@@ -139,6 +139,32 @@ function prevNavOnUp(state: QuestionnaireState, runtime: QuestionnaireRuntime): 
 	};
 }
 
+/** Maps a bare 1–9 keystroke to a visibly numbered option row, including custom input. */
+function optionShortcutAction(
+	data: string,
+	q: QuestionnaireRuntime["questions"][number],
+	runtime: QuestionnaireRuntime,
+): QuestionnaireAction | null {
+	if (!/^[1-9]$/.test(data)) return null;
+	const index = Number(data) - 1;
+	// Every question numbers author options plus the generated custom-input row; the
+	// multi-select Next row deliberately has no number and must remain excluded.
+	if (index > q.options.length) return null;
+	const item = runtime.items[index];
+	if (item?.kind !== "option" && item?.kind !== "other") return null;
+	return { kind: "nav", nextIndex: index, inputValue: runtime.inputBuffer };
+}
+
+function submitShortcutAction(data: string): QuestionnaireAction | null {
+	if (data === "1") return { kind: "submit_nav", nextIndex: 0 };
+	if (data === "2") return { kind: "submit_nav", nextIndex: 1 };
+	return null;
+}
+
+function isConfirmKey(data: string, keybindings: QuestionnaireKeybindings): boolean {
+	return data === SPACE_KEY || keybindings.matches(data, KEYBIND_CONFIRM);
+}
+
 export function routeKey(data: string, state: QuestionnaireState, runtime: QuestionnaireRuntime): QuestionnaireAction {
 	const kb = runtime.keybindings;
 
@@ -212,6 +238,8 @@ export function routeKey(data: string, state: QuestionnaireState, runtime: Quest
 
 	if (runtime.isMulti && state.currentTab === runtime.questions.length) {
 		if (kb.matches(data, KEYBIND_CANCEL)) return { kind: "cancel" };
+		const shortcut = submitShortcutAction(data);
+		if (shortcut) return shortcut;
 		const tab = tabSwitchAction(data, state, runtime);
 		if (tab) return tab;
 		if (kb.matches(data, KEYBIND_UP) || kb.matches(data, KEYBIND_DOWN)) {
@@ -219,7 +247,7 @@ export function routeKey(data: string, state: QuestionnaireState, runtime: Quest
 			const next = wrapTab(state.submitChoiceIndex + delta, 2);
 			return { kind: "submit_nav", nextIndex: (next === 1 ? 1 : 0) as 0 | 1 };
 		}
-		if (kb.matches(data, KEYBIND_CONFIRM)) {
+		if (isConfirmKey(data, kb)) {
 			// D1 (revised): Submit always submits; Cancel always cancels. The warning header
 			// is informational only — `allAnswered(state)` no longer gates submission. Partial
 			// answers flow through `orderedAnswers()` in the host.
@@ -246,6 +274,9 @@ export function routeKey(data: string, state: QuestionnaireState, runtime: Quest
 	if (data === NOTES_ACTIVATE_KEY) {
 		return { kind: "notes_enter" };
 	}
+
+	const shortcut = optionShortcutAction(data, q, runtime);
+	if (shortcut) return shortcut;
 
 	if (kb.matches(data, KEYBIND_UP)) {
 		return prevNavOnUp(state, runtime);
@@ -289,7 +320,7 @@ export function routeKey(data: string, state: QuestionnaireState, runtime: Quest
 		return { kind: "ignore" };
 	}
 
-	if (kb.matches(data, KEYBIND_CONFIRM)) {
+	if (isConfirmKey(data, kb)) {
 		const answer = buildSingleSelectAnswer(state, runtime);
 		if (!answer) return { kind: "ignore" };
 		return { kind: "confirm", answer, autoAdvanceTab: computeAutoAdvanceTab(state, runtime) };
