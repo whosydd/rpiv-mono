@@ -139,17 +139,23 @@ export function crossTabPreviewBudget(questions: readonly QuestionData[], paneWi
  *   1. `labelDriven` = `crossTabMaxLeftWidth(tabs, itemsByTab, paneWidth)`
  *   2. `previewBudget` = `crossTabPreviewBudget(questions, paneWidth)`
  *   3. `slackDonation` = `paneWidth − GAP − previewBudget`
- *   4. Return `min(max(labelDriven, slackDonation), ceiling)` where `ceiling = paneWidth − GAP − MIN_PREVIEW_WIDTH`
+ *   4. Return `min(max(labelDriven, slackDonation), ceiling)` where `ceiling` is the
+ *      tighter of the preview-width safety limit and `MAX_LEFT_RATIO`
  *
- * Invariants:
- *   - Floor: result ≥ MIN_LEFT (labelDriven ≥ MIN_LEFT)
- *   - Preview floor: right column ≥ MIN_PREVIEW_WIDTH (ceiling enforces this)
+ * Invariants (hold at side-by-side widths, paneWidth ≥ PREVIEW_MIN_WIDTH — the only
+ * mode that consumes this value; narrower panes can pull both ceilings under MIN_LEFT):
+ *   - Floor: result ≥ MIN_LEFT (ratioCeiling ≥ 50 once paneWidth ≥ 100)
+ *   - Options cap: left column ≤ paneWidth × MAX_LEFT_RATIO
+ *   - Preview floor: right column ≥ MIN_PREVIEW_WIDTH — enforced transitively by the
+ *     MAX_LEFT_RATIO cap (right column keeps ≥ paneWidth/2 − GAP ≥ 48 cols);
+ *     previewSafetyCeiling is defensive depth that binds only if MAX_LEFT_RATIO
+ *     ever rises above ~0.53
  *   - Cross-tab stability: both reductions are tab-independent
  *   - Determinism: pure of (questions, itemsByTab, paneWidth)
  *
  * `crossTabMaxLeftWidth` is NOT replaced — it continues to exist as the primitive.
- * `MAX_LEFT_RATIO` caps the label-driven path inside `adaptiveLeftWidth`; donation
- * operates above the cap when preview slack is available.
+ * Donation obeys the same `MAX_LEFT_RATIO` cap as the label-driven path; the preview
+ * composer right-aligns narrower boxes inside the remaining column.
  */
 export function crossTabLeftWidthWithDonation(
 	tabs: ReadonlyArray<{ multiSelect?: boolean }>,
@@ -158,13 +164,14 @@ export function crossTabLeftWidthWithDonation(
 	paneWidth: number,
 ): number {
 	const labelDriven = crossTabMaxLeftWidth(tabs, itemsByTab, paneWidth);
-	// Compact-content guard: labels at MIN_LEFT fit below the floor, so widening
-	// the column would only inject dead space between the option list and the
-	// preview box. Skip donation and preserve the compact intent.
-	if (labelDriven <= MIN_LEFT) return labelDriven;
 	const previewBudget = crossTabPreviewBudget(questions, paneWidth);
 	const slackDonation = paneWidth - PREVIEW_COLUMN_GAP - previewBudget;
-	const ceiling = paneWidth - PREVIEW_COLUMN_GAP - MIN_PREVIEW_WIDTH;
+	// At side-by-side widths the ratio ceiling is always the tighter bound
+	// (paneWidth/2 ≤ paneWidth − GAP − MIN_PREVIEW_WIDTH once paneWidth ≥ 94);
+	// previewSafetyCeiling stays as defensive depth should MAX_LEFT_RATIO grow.
+	const previewSafetyCeiling = paneWidth - PREVIEW_COLUMN_GAP - MIN_PREVIEW_WIDTH;
+	const ratioCeiling = Math.floor(paneWidth * MAX_LEFT_RATIO);
+	const ceiling = Math.min(previewSafetyCeiling, ratioCeiling);
 	return Math.min(Math.max(labelDriven, slackDonation), Math.max(1, ceiling));
 }
 
