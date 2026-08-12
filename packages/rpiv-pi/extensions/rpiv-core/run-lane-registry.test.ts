@@ -28,6 +28,7 @@ import {
 	setLaneProgress,
 	setLaneSessionFile,
 	setLaneStatus,
+	setRecap,
 	setUnitStarted,
 	subscribeLanes,
 	sweepRunningUnits,
@@ -345,6 +346,72 @@ describe("run-lane-registry", () => {
 			recordRun("run-1", "ship"); // re-record the SAME id — resume reuses it
 			expect(getLane("run-1")?.status).toBe("running"); // reactivated
 			expect(getLane("run-1")?.lastArtifact).toBeUndefined(); // stale path cleared
+		});
+	});
+
+	describe("retireRun — recap NOT stored (single source of truth is setRecap)", () => {
+		it("retireRun does NOT store recap — single source of truth is setRecap", () => {
+			// retireRun never touches entry.recap — the lane's recap stays undefined
+			// through retirement until setRecap, the sole writer, stores it.
+			recordRun("run-1", "ship");
+			retireRun("run-1", "completed", undefined, ".rpiv/artifacts/builds/ship.md");
+			expect(getLane("run-1")?.lastArtifact).toBe(".rpiv/artifacts/builds/ship.md");
+			expect(getLane("run-1")?.recap).toBeUndefined(); // retireRun wrote nothing
+
+			const recap = { outcome: "completed" as const, artifacts: [".rpiv/artifacts/builds/ship.md"] };
+			setRecap("run-1", recap);
+			expect(getLane("run-1")?.recap).toBe(recap); // setRecap is the sole writer
+		});
+
+		it("recordRun reactivation clears a prior run's recap (resume never leaks the old recap)", () => {
+			recordRun("run-1", "ship");
+			retireRun("run-1", "completed"); // terminal lane (the resume scenario)
+			const recap = { outcome: "completed" as const, artifacts: [".rpiv/artifacts/builds/ship.md"] };
+			setRecap("run-1", recap); // the sole writer
+			expect(getLane("run-1")?.recap).toBe(recap);
+
+			recordRun("run-1", "ship"); // re-record the SAME id — resume reuses it
+			expect(getLane("run-1")?.status).toBe("running"); // reactivated
+			expect(getLane("run-1")?.recap).toBeUndefined(); // stale recap cleared
+		});
+	});
+
+	describe("setRecap — sole recap writer (ungated by terminal status)", () => {
+		it("stores the recap on a RUNNING lane and notifies", () => {
+			recordRun("run-1", "ship");
+			const listener = vi.fn();
+			subscribeLanes(listener);
+			const recap = { outcome: "completed" as const, artifacts: [] };
+			setRecap("run-1", recap);
+			expect(getLane("run-1")?.recap).toBe(recap);
+			expect(listener).toHaveBeenCalledTimes(1); // notify → console re-renders
+		});
+
+		it("stores the recap on a lane ALREADY retired by an abort path", () => {
+			// The x-key stopSelected path (lane-console.ts) retires the lane to "aborted"
+			// while the run is still in-flight; when onWorkflowEnd later fires the recap must
+			// still land. setRecap is the SOLE recap writer precisely because it writes
+			// entry.recap regardless of terminal status — retireRun (which never touches
+			// recap) is a first-retire-wins no-op on the already-retired lane.
+			recordRun("run-1", "ship");
+			retireRun("run-1", "aborted"); // the x-key path — lane flips to "aborted" first
+			expect(getLane("run-1")?.status).toBe("aborted");
+			expect(getLane("run-1")?.recap).toBeUndefined(); // retireRun never stored a recap
+
+			// setRecap writes regardless of terminal status — the recap lands on the
+			// already-retired lane.
+			const recap = { outcome: "aborted" as const, artifacts: [] };
+			setRecap("run-1", recap);
+			expect(getLane("run-1")?.recap).toBe(recap); // stored despite the terminal status
+			expect(getLane("run-1")?.status).toBe("aborted"); // status untouched
+		});
+
+		it("is a no-op on a missing lane (fail-soft)", () => {
+			const listener = vi.fn();
+			subscribeLanes(listener);
+			expect(() => setRecap("nope", { outcome: "completed", artifacts: [] })).not.toThrow();
+			expect(listener).not.toHaveBeenCalled();
+			expect(getLane("nope")).toBeUndefined();
 		});
 	});
 

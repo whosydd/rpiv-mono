@@ -7,6 +7,68 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Each lane now shows an end-of-run recap.** When a run reaches a terminal
+  state, the lane surfaces a one-line summary — the newest artifact, a
+  `+N more` count when more landed, and the `⚠ <reason>` segment for a
+  non-completed outcome — projected from the run's on-disk JSONL trail via
+  rpiv-workflow's new `summarizeRun`. Auto-shown, no toggle; the entries under
+  Changed/Fixed below refine this feature's storage and presentation.
+
+### Changed
+
+- **Artifact paths on lane rows and the recap line drop the canonical
+  `.rpiv/artifacts/` root.** Every collector-produced artifact shares it, so the
+  16 columns carried no information; the `→` segment now reads
+  `<bucket>/<file>.md` (e.g. `→ validation/2026-08-05_….md`). Display-only —
+  stored values (`lastArtifact`, `RunRecap.artifacts`) keep the full path, and a
+  non-canonical path (url/opaque handles, out-of-tree files) passes through
+  untouched.
+
+- **Recap storage collapsed to a single source of truth.** The redundant
+  `retireRun` 5th-arg recap path is removed; `setRecap` is now the sole recap
+  writer (no behavior change — the ungated `setRecap` was already the
+  load-bearing write on both the normal and abort paths). `retireRun` returns to
+  a 4-arg shape `(runId, status, error?, lastArtifact?)`.
+
+### Fixed
+
+- **The end-of-run recap is now a single summary line, not a per-artifact
+  report.** `renderRecap` no longer emits the outcome-glyph + workflow header (a
+  duplicate of the lane chip's status) nor one `→ <path>` line per artifact — it
+  renders exactly one line: the NEWEST artifact (trail-order last, partial
+  artifacts included), a `+N more` count when more landed, and the `⚠ <reason>`
+  segment for a non-completed outcome, joined with ` · ` and each omitted when
+  empty (a recap with nothing to add beyond the chip renders nothing at all).
+  The original multi-line block was both redundant — the lane row above it
+  already carries status, short reason, and the primary artifact — and a
+  belowEditor ghost-block source: as artifact count grew it pushed the lane block
+  past its budget, so the console's total height grew with it. A ≤1-line summary
+  keeps `laneBlock.length` constant w.r.t. artifact count by construction, so the
+  transcript flex region absorbs it and the total stays exactly `maxRows` (the
+  static-lanes + ghost-block invariant). The full artifact list remains available
+  in the run's JSONL trail (`summarizeRun` still projects it — the `RunRecap`
+  data shape is unchanged; this is presentation-only).
+
+- **A resumed lane is no longer re-retired and re-capped by its aborted
+  predecessor's stale terminal `onWorkflowEnd`.** Resume reuses the `runId` and
+  reactivates the retained lane back to `"running"` via `recordRun`, which re-arms
+  `retireRun`'s first-retire-wins gate — so the aborted predecessor's late terminal
+  `onWorkflowEnd` (still on the event loop after a cooperative abort) passed both
+  the status check and the re-armed gate and stamped the resumed lane with the
+  predecessor's outcome + recap. The lifecycle bridge now registers an
+  `onWorkflowStart` listener that captures `ctx.state` (the runner's `run.state`,
+  threaded by reference) keyed by `runId`, and `onWorkflowEnd` early-returns when
+  the recorded instance exists and differs from the event's `ctx.state` — a resume
+  builds a fresh `state` via `reconstructState`, so object identity distinguishes
+  the two instances. Fail-open by design (no instance recorded → no block), so
+  existing `onWorkflowEnd` paths are unchanged. A microtask-scale residual window
+  (between `recordRun` re-arming the gate and the resumed `onWorkflowStart`
+  overwriting the captured instance) is accepted and documented in the guard — it
+  shrinks the old race window, which spanned the predecessor run's entire remaining
+  stage, to microtask scale.
+
 ## [2.4.0] - 2026-08-03
 
 ### Added

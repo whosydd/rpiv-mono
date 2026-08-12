@@ -16,6 +16,8 @@
 
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 
+import type { RunRecap } from "@juicesharp/rpiv-workflow";
+
 import { addLaneUsage, type LaneUsage, toLaneUsage } from "./lane-usage.js";
 import { emitQuestionAsked, emitQuestionResolved } from "./question-lifecycle.js";
 
@@ -201,7 +203,7 @@ export interface LaneEntry {
 	/**
 	 * Primary artifact path at run termination — `RunWorkflowResult.lastArtifact`
 	 * captured at `retireRun` (the runner's terminal `onWorkflowEnd`), so a completed
-	 * lane row can surface `→ .rpiv/artifacts/<bucket>/<file>.md` as a trailing
+	 * lane row can surface `→ <bucket>/<file>.md` as a trailing
 	 * segment. Undefined for a side-effect-only run (no `produces` stage emitted a
 	 * primary artifact) and for aborted/failed runs (the terminal writers pass ≤3
 	 * args). Cleared on resume (`recordRun` reactivation) so a resumed run never
@@ -209,6 +211,16 @@ export interface LaneEntry {
 	 * clears.
 	 */
 	lastArtifact?: string;
+	/**
+	 * End-of-run summary projected from the on-disk JSONL trail by `summarizeRun`
+	 * (rpiv-workflow) — the lane-console renders it via `renderRecap` for a terminal
+	 * lane that carries one. Written by `setRecap` at `onWorkflowEnd` — see it for
+	 * the single-writer invariant. Undefined for a run that never reached
+	 * `onWorkflowEnd` (in-progress / hard-teardown) and cleared on resume
+	 * (`recordRun` reactivation) so a resumed run never leaks the prior recap —
+	 * mirroring `lastArtifact`.
+	 */
+	recap?: RunRecap;
 	/**
 	 * When this lane first started waiting on a deferred foreground question
 	 * — `Date.now()` stamped on the FIRST enqueue that finds the clock
@@ -317,6 +329,7 @@ export function recordRun(runId: string, name: string, meta?: { workflow?: strin
 		existing.units.clear(); // drop the prior run's per-unit sessions + terminal snapshots
 		existing.error = undefined; // clear the prior run's terminal failure reason
 		existing.lastArtifact = undefined; // clear the prior run's primary artifact path
+		existing.recap = undefined; // clear the prior run's end-of-run summary
 		existing.progress = undefined; // clear stale stage progress
 		existing.needsInputSince = undefined; // clear any stale needs-input clock
 	} else {
@@ -457,6 +470,23 @@ export function retireRun(
 }
 
 /**
+ * Store a run's end-of-run summary — the SOLE recap writer, deliberately ungated
+ * by the lane's terminal status: the x-key `stopSelected` path (lane-console.ts)
+ * retires the lane to "aborted" while the run is still in-flight, and the recap
+ * computed at `onWorkflowEnd` must still land on that already-terminal lane
+ * (`retireRun` is a first-retire-wins no-op there and never touches `recap`).
+ * The host's hard-teardown dispose fallback (workflow-execution-host.ts), where
+ * `onWorkflowEnd` may never fire, stores no recap — such a lane reads bare
+ * "aborted". Best-effort: a missing lane is a no-op.
+ */
+export function setRecap(runId: string, recap: RunRecap): void {
+	const entry = state().lanes.get(runId);
+	if (!entry) return;
+	entry.recap = recap;
+	notify();
+}
+
+/**
  * Capture a run's transcript snapshot WHILE its child session is still alive
  * (fast-path). The detached host calls this from its per-stage `finally`,
  * BEFORE `setCurrentSession(runId, undefined)` drops the session and `dispose()`
@@ -464,32 +494,27 @@ export function retireRun(
  * (with `currentSession` already gone), the snapshot is already in place. Best-effort:
  * a missing/evicted lane is a no-op. Does NOT notify — the paired `setCurrentSession`
  * that immediately follows in the host does.
- *
- * Capture-side fold-at-overwrite: a sequential multi-child stage parks EVERY child
- * on the SAME `SINGLE_UNIT_KEY` slot, so `captureSnapshotInto`'s `finalUsage =`
- * overwrite would evict each OUTGOING child's tokens before the stage-end
- * `foldStageUsage` can count them (losing all but the last). Fold the unit's
- * already-parked `finalUsage` (the outgoing child) into the CURRENT stage bucket
- * BEFORE the overwrite; the overwrite then EVICTS it from the slot, so
- * `foldStageUsage` cannot re-count it. Capture-time (children 1..N-1) and stage-end
- * (surviving last child N) touch disjoint sets → fold-exactly-once, no double-count.
- * Fail-soft by composition: no parked `finalUsage` (first capture / a failed
- * getUsage) skips the fold, and `addStageUsage`'s own guard drops an unset
- * stageName (pre-first-stage capture). Usage-only — `finalBranch`/`finalCwd`/
- * `finalToolDefs` stay last-writer-wins across the overwrite.
- *
- * The fold is gated on a LIVE lane (`status === "running"`): the dock's optimistic
- * `x` cancel calls `retireRun` BEFORE this teardown capture, and retire's own
- * snapshot parks the SAME still-live child's usage onto the slot — so the parked
- * value here is a same-child re-capture, not an outgoing sibling. Folding it would
- * count the child twice (once in the bucket, once via the retained unit at render).
- * Post-retirement the overwrite-only path is exactly right.
  */
 export function captureFinalSnapshot(runId: string, index: number, session: LaneSession): void {
 	const entry = state().lanes.get(runId);
 	if (!entry) return;
 	const unit = upsertUnit(entry, index);
+	// The fold is gated on a LIVE lane (`status === "running"`): the dock's optimistic
+	// `x` cancel calls `retireRun` BEFORE this teardown capture, and retire's own snapshot
+	// parks the SAME still-live child's usage onto the slot — so the parked value here is a
+	// same-child re-capture, not an outgoing sibling. Folding here would double-count (once
+	// in the bucket, once via the retained unit at render). Post-retirement the overwrite-only
+	// path is exactly right.
 	if (unit.finalUsage && entry.status === "running") {
+		// Fold-at-overwrite: a sequential multi-child stage parks EVERY child on the SAME
+		// `SINGLE_UNIT_KEY` slot, so `captureSnapshotInto`'s `finalUsage =` overwrite would
+		// evict each OUTGOING child's tokens before the stage-end `foldStageUsage` can count
+		// them (losing all but the last). Fold the unit's already-parked `finalUsage` (the
+		// outgoing child) into the CURRENT stage bucket via `addStageUsage` BEFORE the
+		// overwrite; the overwrite then EVICTS it from the slot, so `foldStageUsage` cannot
+		// re-count it. Capture-time (children 1..N-1) and stage-end (surviving last child N)
+		// touch disjoint sets → fold-exactly-once, no double-count. Usage-only —
+		// `finalBranch`/`finalCwd`/`finalToolDefs` stay last-writer-wins across the overwrite.
 		addStageUsage(runId, entry.progress?.stageName, unit.finalUsage);
 	}
 	captureSnapshotInto(unit, session);

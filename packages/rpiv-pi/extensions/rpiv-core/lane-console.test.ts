@@ -28,6 +28,7 @@ import {
 	setCurrentSession,
 	setLaneProgress,
 	setLaneSessionFile,
+	setRecap,
 	setUnitStarted,
 } from "./run-lane-registry.js";
 
@@ -558,9 +559,9 @@ describe("LaneConsole — browser navigation (spine)", () => {
 			vi.fn(),
 			vi.fn(),
 		);
-		const follow = panel.render(80).join("\n"); // prime lastMaxStart (cached in render; scroll reads it — see r1)
+		const follow = panel.render(80).join("\n"); // prime lastMaxStart (cached in render; scroll reads it)
 		panel.handleInput("\x1b[5~"); // PageUp on run-1 → paused (follow OFF, anchor set)
-		expect(panel.render(80).join("\n")).not.toBe(follow); // anchor moved off the tail — paused (see r2)
+		expect(panel.render(80).join("\n")).not.toBe(follow); // anchor moved off the tail — paused
 		panel.handleInput("\x1b[B"); // ↓ → run-2 (retarget resets follow=ON)
 		panel.handleInput("\x1b[A"); // ↑ → back to run-1 (retarget resets follow=ON — no scroll memory)
 		const out = panel.render(80);
@@ -890,6 +891,41 @@ describe("LaneConsole — constant height (ghost-block safety)", () => {
 		panel.handleInput("\r"); // arm → the band paints so the height check reflects the cap
 		expect(panel.render(80).length).toBe(readonly); // padded → identical height across the transition
 		panel.dispose();
+	});
+});
+
+describe("LaneConsole — recap-height (one-line summary keeps total height constant)", () => {
+	it("renders a constant total console height regardless of artifact count", () => {
+		// The recap is a SINGLE summary line by construction (newest artifact + `+N more`
+		// fold), so laneBlock.length is constant w.r.t. artifact count — the transcript flex
+		// region absorbs it and the total stays exactly Math.floor(rows * 0.9) = maxRows
+		// (the static-lanes + ghost-block invariant).
+		function renderCompletedRecap(artifactCount: number): number {
+			__resetRunLaneRegistry();
+			recordRun("run-1", "ship");
+			retireRun("run-1", "completed"); // terminal BEFORE opening → the console stays open
+			setRecap("run-1", {
+				outcome: "completed",
+				artifacts: Array.from({ length: artifactCount }, (_v, i) => `a${i}.md`),
+			});
+			const panel = new LaneConsole(
+				"run-1",
+				SINGLE_UNIT_KEY,
+				makeTui(24),
+				identityTheme,
+				{} as never,
+				vi.fn(),
+				vi.fn(),
+			);
+			const height = panel.render(80).length;
+			panel.dispose();
+			return height;
+		}
+
+		const few = renderCompletedRecap(2);
+		const many = renderCompletedRecap(20);
+		expect(few).toBe(Math.floor(24 * 0.9)); // 21 — exactly maxRows
+		expect(many).toBe(few); // one-line summary → constant total height as artifacts grow
 	});
 });
 

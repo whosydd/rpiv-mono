@@ -6,6 +6,7 @@ import {
 	MAX_DOCK_ROWS,
 	MAX_WIDGET_LINES,
 	renderLaneList,
+	renderRecap,
 	renderStageBreakdown,
 } from "./lane-list.js";
 import { formatTokens } from "./lane-usage.js";
@@ -21,6 +22,7 @@ import {
 	SINGLE_UNIT_KEY,
 	setLaneProgress,
 	setLaneStatus,
+	setRecap,
 	setUnitStarted,
 } from "./run-lane-registry.js";
 import { __resetSubagentUsage, recordSubagentCompletion } from "./subagent-usage.js";
@@ -202,10 +204,12 @@ describe("renderLaneList — completed-lane lastArtifact segment", () => {
 	// narrow terminal (criterion #3) is a separate concern exercised manually.
 	const W = 200;
 
-	it("renders `→ <path>` as a trailing segment AFTER the usage tally on a completed lane", () => {
+	it("renders `→ <bucket>/<file>` as a trailing segment AFTER the usage tally on a completed lane", () => {
 		// A completed lane with live stage progress + usage + lastArtifact renders:
-		//   …commit · ↑134k ↓26k R2.1M → .rpiv/artifacts/builds/ship.md
-		// The artifact segment is the LAST tail segment (after the usage tally).
+		//   …commit · ↑134k ↓26k R2.1M → builds/ship.md
+		// (displayArtifact strips the canonical `.rpiv/artifacts/` root — display only,
+		// the stored lastArtifact keeps the full path.) The artifact segment is the LAST
+		// tail segment (after the usage tally).
 		recordRun("run-1", "ship", { workflow: "ship" });
 		setLaneProgress("run-1", { stageName: "commit", phase: "running" });
 		// Seed usage on the lane's single-stage unit via captureFinalSnapshot, then retire
@@ -226,10 +230,11 @@ describe("renderLaneList — completed-lane lastArtifact segment", () => {
 		const row = lines.find((l) => l.includes("commit")) ?? "";
 		expect(row).toContain("↑134k");
 		expect(row).toContain("R2.1M");
-		// The artifact segment is present …
-		expect(row).toContain("→ .rpiv/artifacts/builds/ship.md");
+		// The artifact segment is present, canonical root stripped …
+		expect(row).toContain("→ builds/ship.md");
+		expect(row).not.toContain(".rpiv/artifacts"); // display form only
 		// … and trails the usage tally (the `→` comes after the last usage segment).
-		expect(row.lastIndexOf("↑134k")).toBeLessThan(row.indexOf("→ .rpiv/artifacts/builds/ship.md"));
+		expect(row.lastIndexOf("↑134k")).toBeLessThan(row.indexOf("→ builds/ship.md"));
 	});
 
 	it("renders NO `→` segment when lastArtifact is undefined (byte-identical to a side-effect-only run)", () => {
@@ -515,6 +520,105 @@ describe("renderStageBreakdown — per-stage token breakdown", () => {
 	});
 });
 
+describe("renderRecap — end-of-run summary", () => {
+	const W = 120;
+
+	it("returns [] for a missing/evicted lane", () => {
+		expect(renderRecap(identityTheme, W, "nope")).toEqual([]);
+	});
+
+	it("returns [] when the lane has no recap (running / reactivated lane — byte-identical render)", () => {
+		recordRun("run-1", "ship");
+		retireRun("run-1", "completed"); // retired but no recap stored
+		expect(renderRecap(identityTheme, W, "run-1")).toEqual([]);
+	});
+
+	it("emits NO header (no status glyph, no outcome word, no ` · workflow` segment)", () => {
+		recordRun("run-1", "ship");
+		setRecap("run-1", { outcome: "completed", workflow: "ship", artifacts: ["a.md"] });
+		const lines = renderRecap(identityTheme, W, "run-1");
+		const out = lines.join("\n");
+		// No status glyph (▶✓✗⊘), no outcome word, no `· workflow` segment — the header was a
+		// duplicate of the lane chip's status and is dropped.
+		expect(out).not.toMatch(/[▶✓✗⊘]/);
+		expect(out).not.toContain("completed");
+		expect(out).not.toContain("· ship");
+	});
+
+	it("renders ONE line: the NEWEST artifact (trail-order last) + a `+N more` count", () => {
+		recordRun("run-1", "ship");
+		setRecap("run-1", {
+			outcome: "completed",
+			artifacts: [".rpiv/artifacts/plans/a.md", ".rpiv/artifacts/builds/b.md"],
+		});
+		const lines = renderRecap(identityTheme, W, "run-1");
+		// Single summary line — never a per-artifact report. displayArtifact strips the
+		// canonical `.rpiv/artifacts/` root (display only — the stored path is full).
+		expect(lines.length).toBe(1);
+		expect(lines[0]).toContain("→ builds/b.md"); // newest, not the first
+		expect(lines[0]).not.toContain(".rpiv/artifacts"); // root stripped for display
+		expect(lines[0]).not.toContain("plans/a.md"); // older artifacts fold into the count
+		expect(lines[0]).toContain("+1 more");
+	});
+
+	it("omits the `+N more` count for a single-artifact recap", () => {
+		recordRun("run-1", "ship");
+		setRecap("run-1", { outcome: "completed", artifacts: [".rpiv/artifacts/builds/b.md"] });
+		const lines = renderRecap(identityTheme, W, "run-1");
+		expect(lines.length).toBe(1);
+		expect(lines[0]).toContain("→ builds/b.md");
+		expect(lines[0]).not.toContain("more");
+	});
+
+	it("passes a non-canonical artifact path through untouched (url/opaque/out-of-tree handles)", () => {
+		recordRun("run-1", "ship");
+		setRecap("run-1", { outcome: "completed", artifacts: ["https://example.com/report"] });
+		const lines = renderRecap(identityTheme, W, "run-1");
+		expect(lines[0]).toContain("→ https://example.com/report");
+	});
+
+	it("stays ONE line regardless of artifact count (the summary never grows with data size)", () => {
+		recordRun("run-1", "ship");
+		setRecap("run-1", {
+			outcome: "failed",
+			failureReason: "build exploded",
+			artifacts: Array.from({ length: 20 }, (_v, i) => `a${i}.md`),
+		});
+		const lines = renderRecap(identityTheme, W, "run-1");
+		expect(lines.length).toBe(1);
+		expect(lines[0]).toContain("→ a19.md"); // newest
+		expect(lines[0]).toContain("+19 more");
+		expect(lines[0]).toContain("⚠ build exploded"); // reason shares the same line
+	});
+
+	it("returns [] for a completed recap with no artifacts (nothing to add beyond the lane chip)", () => {
+		recordRun("run-1", "ship");
+		setRecap("run-1", { outcome: "completed", artifacts: [] });
+		expect(renderRecap(identityTheme, W, "run-1")).toEqual([]);
+	});
+
+	it("renders the `⚠ reason` segment only for a NON-completed outcome that carries a failureReason", () => {
+		recordRun("run-1", "ship");
+		setRecap("run-1", { outcome: "failed", failureReason: "blueprint produced no plan", artifacts: [] });
+		const lines = renderRecap(identityTheme, W, "run-1");
+		expect(lines.length).toBe(1); // reason alone still summarizes (untruncated by the chip's short form)
+		expect(lines[0]).toContain("⚠ blueprint produced no plan");
+	});
+
+	it("renders NO `⚠` segment for a completed outcome (even if a failureReason were present)", () => {
+		recordRun("run-1", "ship");
+		setRecap("run-1", { outcome: "completed", failureReason: "should not show", artifacts: ["a.md"] });
+		const lines = renderRecap(identityTheme, W, "run-1");
+		expect(lines.every((l) => !l.includes("⚠"))).toBe(true);
+	});
+
+	it("returns [] for a non-completed recap with no failureReason and no artifacts", () => {
+		recordRun("run-1", "ship");
+		setRecap("run-1", { outcome: "aborted", artifacts: [] });
+		expect(renderRecap(identityTheme, W, "run-1")).toEqual([]);
+	});
+});
+
 describe("renderLaneList — run grand total", () => {
 	const LANE_CAP = computeLaneLayout(40).laneCap; // 11
 	// Wide enough that the heading tally never truncates — the dock heading is short
@@ -585,8 +689,8 @@ describe("renderLaneList — run grand total", () => {
 		expect(heading).not.toContain("↓");
 	});
 
-	it("the renderLaneRow roll-in through laneUsageTotal matches the Phase-1 inline expression on a single-stage run (risk r1)", () => {
-		// For a SINGLE-stage run (stageUsage empty), laneUsageTotal reduces to the Phase-1
+	it("the renderLaneRow roll-in through laneUsageTotal matches the former inline expression on a single-stage run", () => {
+		// For a SINGLE-stage run (stageUsage empty), laneUsageTotal reduces to the former
 		// inline expression addLaneUsage(sumLaneUsage(units), getSubagentUsageForRun(runId)),
 		// so routing the per-row tally through it changes nothing observable here. (Multi-stage
 		// runs intentionally upgrade the row from "current stage" to "run so far" — covered by

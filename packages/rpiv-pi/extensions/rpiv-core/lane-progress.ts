@@ -45,6 +45,7 @@ import {
 	retireRun,
 	seedPendingUnits,
 	setLaneProgress,
+	setRecap,
 	setUnitStarted,
 	sweepRunningUnits,
 } from "./run-lane-registry.js";
@@ -85,6 +86,20 @@ function guard(): ProgressGuard {
 const fanoutRuns = new Set<string>();
 
 /**
+ * runId → the current run instance's `ctx.state`. A resume reuses the runId but
+ * starts a fresh `ctx.state`, so object identity distinguishes the predecessor
+ * from its resumed successor — the basis of the `onWorkflowEnd` instance guard
+ * below. Seeded on `onWorkflowStart`, deleted on the terminal-proceed path,
+ * cleared wholesale by `__resetLaneProgress`. Module-local (the bridge runs only
+ * at the root launcher).
+ *
+ * Residual (microtask-scale, accepted): a predecessor end landing between the
+ * successor's `recordRun` and its `onWorkflowStart` seed-overwrite still slips
+ * through.
+ */
+const activeInstances = new Map<string, object>();
+
+/**
  * Wire the lifecycle→registry bridge to the ROOT launcher's session_start.
  * Skipped for a detached foreground child (branded relay ui) and any non-UI
  * session — the same gate the execution-host provider hook uses.
@@ -116,8 +131,15 @@ export async function registerLaneProgress(): Promise<void> {
 	try {
 		// Thin `/startup` entry (re-exports registerLifecycle) — keeps the
 		// loader/DSL/runner graph off startup and avoids the barrel-import race.
-		const { registerLifecycle } = await import("@juicesharp/rpiv-workflow/startup");
+		const { registerLifecycle, summarizeRun } = await import("@juicesharp/rpiv-workflow/startup");
 		g.dispose = registerLifecycle({
+			// Seed run-INSTANCE identity keyed by runId. A resume REUSES the runId, so a
+			// runId-only gate is racy — but `reconstructState` hands the resumed successor a
+			// FRESH ctx.state object, so the onWorkflowEnd instance guard compares identities to
+			// drop a stale predecessor's late end (it must not re-retire/re-cap the resumed lane).
+			onWorkflowStart: (ctx) => {
+				activeInstances.set(ctx.runId, ctx.state);
+			},
 			// onStageStart fires for EVERY stage kind — a plain sequential stage (the single-stage
 			// entry announcement, run-stage.ts:221) AND every loop stage, where it fires BEFORE
 			// onLoopStart (announceLoopStart, loop.ts:75→78). So retiring the prior stage's fan-out
@@ -217,6 +239,13 @@ export async function registerLaneProgress(): Promise<void> {
 			onWorkflowEnd: (result, ctx) => {
 				const status = result.termination?.status;
 				if (!status || status === "running") return; // still in-flight — nothing to retire
+				// Run-instance guard: drop a superseded predecessor's late terminal event so it can't
+				// re-stamp the resumed lane with the predecessor's outcome + recap (a resume reactivates
+				// the lane to "running", re-arming retireRun's first-retire-wins gate). Fail-open when no
+				// instance was recorded — see `activeInstances` for the identity basis + residual window.
+				const recorded = activeInstances.get(ctx.runId);
+				if (recorded !== undefined && recorded !== ctx.state) return; // stale predecessor end
+				activeInstances.delete(ctx.runId); // keep the map bounded to in-flight runs
 				const lane = getLane(ctx.runId);
 				const name = lane?.name ?? ctx.workflow;
 				// `termination.error` is the readable cause (the same text as the trail's
@@ -224,14 +253,22 @@ export async function registerLaneProgress(): Promise<void> {
 				const error = result.termination?.error;
 				// `lastArtifact` is the primary artifact's canonical path (a `produces`
 				// stage emitted one) — retained on the lane so a completed row can render
-				// `→ .rpiv/artifacts/<bucket>/<file>.md`. Undefined for side-effect-only runs.
+				// `→ <bucket>/<file>.md`. Undefined for side-effect-only runs.
 				const lastArtifact = result.lastArtifact;
 				// Sweep any unit that never fired onUnitEnd (abort/throw) to the run's terminal
 				// kind BEFORE retiring, so a failed run's stuck sub-rows read ✗ (retireRun's
 				// running→done fallback then no-ops on them). Drop the gate — the run is over.
 				sweepRunningUnits(ctx.runId, status === "completed" ? "done" : "failed");
 				fanoutRuns.delete(ctx.runId);
+				// End-of-run summary off the on-disk JSONL trail (the post-mortem recap). Computed
+				// for EVERY terminal outcome (completed/failed/cancelled/aborted), not only failures,
+				// and BEFORE retirement so the lane is still live while the trail is read. The recap
+				// does NOT gate retirement: a run whose recap resolved to undefined still retires.
+				const recap = summarizeRun(ctx.cwd, ctx.runId);
 				retireRun(ctx.runId, status, error, lastArtifact);
+				// Land the recap on the (possibly already-terminal) lane. See `setRecap` for why it's
+				// ungated by status. Fail-soft: an undefined recap stores nothing.
+				if (recap !== undefined) setRecap(ctx.runId, recap);
 				const ui = getCapturedUiContext();
 				if (!ui) return;
 				if (status === "completed") ui.notify(`✓ ${name} finished — /lanes to view`, "info");
@@ -263,4 +300,5 @@ export function __resetLaneProgress(): void {
 	g.dispose?.();
 	g.dispose = undefined;
 	fanoutRuns.clear();
+	activeInstances.clear();
 }
