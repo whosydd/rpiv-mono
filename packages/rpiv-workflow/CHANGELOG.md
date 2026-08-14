@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-08-13
+
 ### Added
 
 - **`summarizeRun()` + `RunRecap`** — a terminal-state projection of a run's
@@ -9,6 +11,18 @@
   `readLastStage`/`readHeader`/`listArtifacts` (fail-soft by inheritance).
   Exported via `state/index.ts`, `registration.ts`, and the thin `startup.ts`
   entry; consumed by rpiv-pi's lane recap.
+
+- **`RunRecap` outcome `"stopped"` — a gate-routed stop no longer reads as
+  success.** A run whose trail ends with a `RoutingDecision` of `"stop"` (a
+  stop-on-fail gate fired before the chain's natural end) was
+  indistinguishable from a clean completion: the runner terminates it
+  `"completed"` and no stage row carries an `errMsg`. `summarizeRun` now
+  refines that shape to outcome `"stopped"` with `failureReason` `"stopped at
+  <stage>[: <note>]"`, sourcing the reason from the stopping edge's persisted
+  routing note. New `setRouteNote(fn, note)` (exported from `registration.ts`)
+  lets bespoke `defineRoute` gates attach that note the way `gate`/`match`
+  already attach their no-match diagnostics; `takeRouteNote` joins the
+  test-only `internal.ts` surface.
 
 ### Fixed
 

@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-08-13
+
 ### Added
 
 - **Each lane now shows an end-of-run recap.** When a run reaches a terminal
@@ -16,7 +18,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rpiv-workflow's new `summarizeRun`. Auto-shown, no toggle; the entries under
   Changed/Fixed below refine this feature's storage and presentation.
 
+- **The `ship` workflow is back — rebuilt as a lightweight `/wf` preset.** A single forward pass for a small, well-understood task: `goal → research → plan → plan-cite-check → grade → implement → implement-scope-check → reconcile → validate → commit`, stop-on-fail at every gate — no fix loops, confirm panels, snapshots, or code-elaboration lane. Research is front-loaded and trimmed (a custom prompt stage with at most two `codebase-analyzer` dispatches, not a full `/skill:research` pass), the plan comes from the new `quick-plan` skill, and one tier-independent grade (correctness, completeness, architecture-fit) gates it before `implement`. This inverts the removal calculus of 2.3.0's no-research subset: the old `ship` skipped research to save latency and paid for it in grounding; the new one keeps research but trims it to scale.
+
+- **New `quick-plan` skill — the lightweight plan producer `ship` dispatches.** Consumes a `research` artifact and writes one implement-ready `status: ready` plan: at most a single targeted `codebase-pattern-finder` dispatch, then the plan — no slice decomposition, no per-slice verification loop, no risk frontmatter, no interactive checkpoints. Workflow-dispatched only (`disable-model-invocation: true`).
+
 ### Changed
+
+- **A gate-stopped run now says so — end-of-run toast and lane recap carry the stop reason.** A stop-on-fail gate routing to `stop` (ship's citation floor and grade gate, any `match`/`gate` no-match) used to surface exactly like a full pass: a `✓ finished` toast and a completed recap, with the failing verdict unread on disk — observed on ship's first run, which silently stopped at a failed completeness gate. rpiv-workflow's recap now refines that shape to outcome `stopped` (see its changelog), ship's two bespoke gates attach a stop-reason note naming the blocking dimensions and severity (via the new `setRouteNote`), and the lane toast becomes `⚠ <name> stopped at <gate>: <reason> — /lanes to view` while the lane console's recap line picks up the `⚠` segment unchanged.
+
+- **`ship`'s plan stage now hands `quick-plan` the verbatim goal, and `quick-plan` must defer narrowed-out asks explicitly.** The stage declares `reads: ["research", "goal"]` (dispatching `--research <path> --goal <path>`) instead of falling to the rolling primary, so the planner anchors on the same verbatim brief the grade panel's completeness dimension judges against — previously it saw only the research doc, whose grounding routinely narrows a broad brief. `quick-plan` gains a matching obligation: an `## Out of Scope` template section plus a "defer explicitly, never silently" rule — every ask the goal names that no phase implements gets a one-line deferral with a reason, the exact form the completeness grade already accepts. Closes the gap where a research-stage narrowing was silently inherited by the plan and then failed ship's stop-on-fail completeness gate (observed on the preset's first run).
 
 - **Artifact paths on lane rows and the recap line drop the canonical
   `.rpiv/artifacts/` root.** Every collector-produced artifact shares it, so the
@@ -31,6 +41,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   writer (no behavior change — the ungated `setRecap` was already the
   load-bearing write on both the normal and abort paths). `retireRun` returns to
   a 4-arg shape `(runId, status, error?, lastArtifact?)`.
+
+- **Published skill-count prose corrected: 27 → 29 (and 18 → 20 model-hidden).** `remediate` (2.4.0) already declared a contract the prose never caught up to; `quick-plan` adds one more. Every "27 skills" / "18 of the 27 skills" site across `package.json`, the README, and `docs/` now reads 29 / 20 of the 29, and the published description names four built-in `/wf` workflows. Alongside, `models.json` `presets.ship` is a live key again — the warn-on-miss validator builds its known-workflow set from the live `builtInWorkflows`, so the returning `ship` silently un-warns it (only `presets.arch` and `presets["pr-triage"]` remain stale).
 
 ### Fixed
 

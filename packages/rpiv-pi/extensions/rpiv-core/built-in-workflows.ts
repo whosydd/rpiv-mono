@@ -24,6 +24,7 @@ import {
 	defineRoute,
 	defineWorkflow,
 	directoryPathCollector,
+	type EdgeFn,
 	eq,
 	type FanoutContext,
 	fanin,
@@ -40,11 +41,29 @@ import {
 	produces,
 	type RunView,
 	type ScriptContext,
+	setRouteNote,
 	type Unit,
 	type Workflow,
 } from "@juicesharp/rpiv-workflow/registration";
-import { StagePreflightError } from "@juicesharp/rpiv-workflow/runner";
 import { rpivBucketOutcome } from "./artifact-collector.js";
+import {
+	countHeadingsOutsideFences,
+	FILE_LINE_CITATION_RE,
+	type FsArtifact,
+	fencedSpans,
+	forEachLineOutsideFences,
+	haltPreflight,
+	latestFsArtifact,
+	MAX_PHASES,
+	type PhaseRecord,
+	readArtifactFile,
+	type StructureFinding,
+	TEST_PATH_RE,
+	VERDICT_DIR,
+	VERDICT_FAIL_SCORE,
+	VERDICT_PASS_SCORE,
+	writeStructureVerdict,
+} from "./built-ins/index.js";
 
 // The code-review stage's output schema is no longer declared here — every
 // code-review stage sources it from the skill's contract `produces.data`
@@ -54,120 +73,11 @@ import { rpivBucketOutcome } from "./artifact-collector.js";
 // routes on the same numeric gate: `gate("blockers_count", { <fix>: gt(0), commit: eq(0) }, "commit")`.
 
 /**
- * A plan's structured `phases:` frontmatter array — the machine-readable phase
- * enumeration a plan-producing skill (`blueprint`, `plan`) derives from its
- * `## Phase N:` body headings — is what drives `implement` fanout. The
- * convention lives here; rpiv-workflow knows nothing about phases.
- *
- * Cap: a plan declaring more than 32 phases throws. The rpiv-pi planning skills
- * cap around 8 phases in practice; 32 leaves headroom for stretch plans without
- * letting a pathological (or hostile) plan drive an unbounded fanout loop.
- */
-const MAX_PHASES = 32;
-
-/**
  * `## Phase N:` headings — the source of truth a plan's `phases:` frontmatter
  * array is derived from. Used to verify that derived array, not to enumerate
  * (enumeration reads the typed `phases:` array).
  */
 const PLAN_PHASE_RE = /^## Phase (\d+):/gm;
-
-/**
- * A fence-opening line: optional leading whitespace then 3+ backticks or 3+
- * tildes (the CommonMark info-string delimiter). Single source of truth every
- * fence-aware scan shares.
- */
-const FENCE_LINE_RE = /^\s*(`{3,}|~{3,})/;
-
-/**
- * Whether `line` CLOSES the fence whose opener recorded `fenceChar` and
- * `fenceLen`. CommonMark: a closing fence uses the SAME char (``` ``` ``` does not
- * close `~~~`) and is at least as long (a 4-backtick opener needs 4+ to close),
- * with only that char plus optional trailing whitespace on the line. `fence` is
- * the current line's `RegExpExecArray` match (narrowed from the guarded
- * `.exec()` result).
- */
-const closesFence = (line: string, fence: RegExpExecArray, fenceChar: string, fenceLen: number): boolean => {
-	const len = fence[1].length;
-	return fence[1][0] === fenceChar && len >= fenceLen && line.trim().length === len;
-};
-
-/**
- * Visit every line of `content` that sits OUTSIDE fenced code blocks, calling
- * `visit(line, index)` with the line text and its 0-based index in
- * `content.split("\n")`. A `## Phase N:` / `## Slice N:` / `### Phase N —` / a
- * `#### N. path` inside a ``` or ~~~ fence is example/fixture text — a meta-plan
- * (one whose subject is the pipeline) legitimately embeds the pipeline's own
- * plan/slice fixtures — not a structural heading or declared write, so a naive
- * line scan would false-count it. Mirrors the fence-aware boundary scan in
- * skills/_shared/stitch-elaborations.mjs. Fence-opener and fence-closer lines
- * are skipped (never visited); `index` advances once per line (including skipped
- * fence lines) so it stays aligned with any caller's own `content.split("\n")`
- * array.
- */
-const forEachLineOutsideFences = (content: string, visit: (line: string, index: number) => void): void => {
-	let inFence = false;
-	let fenceLen = 0;
-	let fenceChar = "";
-	let index = 0;
-	for (const line of content.split("\n")) {
-		const fence = FENCE_LINE_RE.exec(line);
-		if (fence) {
-			if (!inFence) {
-				inFence = true;
-				fenceLen = fence[1].length;
-				fenceChar = fence[1][0];
-			} else if (closesFence(line, fence, fenceChar, fenceLen)) {
-				inFence = false;
-				fenceLen = 0;
-				fenceChar = "";
-			}
-		} else if (!inFence) {
-			visit(line, index);
-		}
-		index++;
-	}
-};
-
-/**
- * Count lines matching `re` (a `^…` heading pattern) that sit OUTSIDE fenced code
- * blocks. Fence-awareness lives on `forEachLineOutsideFences` (a naive `matchAll`
- * counts fenced examples and false-throws the derived-array staleness guard);
- * the per-line `lineRe` drops the source's `g`/`m` flags so `lastIndex` can't drift.
- */
-const countHeadingsOutsideFences = (content: string, re: RegExp): number => {
-	const lineRe = new RegExp(re.source); // per-line test; drop g/m so lastIndex can't drift
-	let count = 0;
-	forEachLineOutsideFences(content, (line) => {
-		if (lineRe.test(line)) count++;
-	});
-	return count;
-};
-
-/**
- * One parsed entry of a plan's `phases:` array. `entry` carries the whole raw
- * frontmatter object, so a consumer can read fields beyond `{ n, title }`
- * without this parser knowing about them.
- */
-interface PhaseRecord {
-	entry: Record<string, unknown>;
-	/** From `entry.n`, falling back to the 1-based array position. */
-	n: number;
-	/** From `entry.title`, or "" when absent. */
-	title: string;
-	/** 0-based position in the array. */
-	index: number;
-	/** Total phases in this plan. */
-	total: number;
-}
-
-/** Read an artifact file, resolving a workflow-relative path against `cwd`. */
-const readArtifactFile = (path: string, cwd: string): string =>
-	readFileSync(isAbsolute(path) ? path : join(cwd, path), "utf-8");
-
-/** Build the halting `StagePreflightError` shape every phase fanout/iterate guard `throw`s. */
-const haltPreflight = (who: string, summary: string, detail: string): StagePreflightError =>
-	new StagePreflightError("halt", who, summary, detail, true);
 
 /**
  * Parse a plan's `phases:` frontmatter into records, derive-checked against the
@@ -214,10 +124,6 @@ const planPhaseRecords = (content: string, who: string, path: string): readonly 
 	});
 };
 
-/** Latest `fs`-handle artifact most recently published under `name` (undefined if none). */
-const latestFsArtifact = (state: RunView, name: string): Artifact | undefined =>
-	state.named[name]?.at(-1)?.artifacts.find((a) => a.handle.kind === "fs");
-
 /**
  * Read the latest plan published to the named `"plans"` channel and parse its
  * `phases:` frontmatter into records — the shared read/halt body both
@@ -256,17 +162,6 @@ const readPlanPhaseRecords = (
 	const promptPath = handleToString(plan.handle);
 	return { records, promptPath };
 };
-
-/**
- * An `Artifact` narrowed to its `fs`-handle variant — the plan-path-carrying
- * shape the scope checks key the verdict path + `artifact` field off. Annotates
- * a captured artifact ACROSS loop iterations so the `if (a.handle.kind !== "fs")
- * continue` guard's narrowing carries to the post-loop `latest.handle.path` read
- * (the file's idiom — `designPathsBySlice` reads `.path` inside its own
- * same-scope guard; this loop captures the artifact across iterations, so the
- * narrowed type annotates the capture).
- */
-type FsArtifact = Artifact & { handle: { kind: "fs"; path: string } };
 
 /**
  * Union the per-phase `files:` write-set declared across the FULL `plans`
@@ -719,6 +614,19 @@ const PLAN_DIMENSIONS = [
 	"architecture-fit",
 ] as const;
 
+/**
+ * The FIXED three-dimension roster ship's grade panel grades — the bespoke,
+ * tier-independent counterpart of `PLAN_DIMENSIONS`. Ship is a lightweight
+ * preset: it front-loads `research` (so `architecture-fit` always has its
+ * `--context`) and grades a trimmed, always-on set regardless of run shape.
+ * `SHIP_DIMENSION_FANOUT` and `shipGatePasses` bind this roster DIRECTLY — no
+ * `gateRoster(gateTier(...))` wrap — so a single-phase ship run still grades
+ * `architecture-fit`, the dimension a tiered gate would drop in the light
+ * roster. Order mirrors `PLAN_DIMENSIONS` (goal-anchored dimensions first,
+ * fit last) so the emitted units stay stable.
+ */
+export const SHIP_DIMENSIONS = ["completeness", "correctness", "architecture-fit"] as const;
+
 /** Bucket directory the goal capture writes into — build's verbatim-brief channel. */
 const GOAL_DIR = ".rpiv/artifacts/goal";
 
@@ -906,6 +814,30 @@ const scopeExcess = (dirty: readonly string[], baseline: readonly string[], decl
  * `validate` prompt-stage precedent).
  */
 const RESEARCH_BRIEF_PROMPT: PromptFn = ({ state }) => `/skill:research ${state.originalInput}`;
+
+/**
+ * ship's research front-load — a LEANER grounding than build's `/skill:research`
+ * pass. Bypasses the research skill and bounds the agent to at most TWO targeted
+ * `codebase-analyzer` dispatches (sequentially — never parallel, never
+ * `run_in_background`) to map only what a lightweight single-phase plan needs to
+ * be correct: entry points, the relevant module's shape, and the conventions the
+ * implement lane must match. The agent then `Write`s a grounding doc under
+ * `.rpiv/artifacts/research/`, where the research bucket collector harvests it —
+ * the grade panel's architecture-fit dimension threads it as `--context` exactly
+ * as build's research artifact does. A prompt stage (no skill), so the stage
+ * name `research` drives outcome derivation (research contract → `research`
+ * bucket), exactly as build's `RESEARCH_BRIEF_PROMPT` stage does — the prompt
+ * text, not dispatch, is what differs.
+ */
+const SHIP_RESEARCH_PROMPT: PromptFn = ({ state }) =>
+	[
+		"Ground this brief for a lightweight ship plan.",
+		"Do NOT dispatch /skill:research. Instead dispatch at most TWO targeted codebase-analyzer subagents (sequentially — never parallel, never run_in_background) to map only what a single-phase plan needs to be correct: entry points, the relevant module's shape, and the conventions the implement lane must match.",
+		"",
+		`Brief: ${state.originalInput}`,
+		"",
+		"Then Write a grounding doc under .rpiv/artifacts/research/ (timestamped filename) carrying the findings, and stop.",
+	].join("\n");
 
 /** `## Slice N:` headings — the source of truth a slice map's `slices:` array is derived from. */
 const SLICE_HEADING_RE = /^## Slice (\d+):/gm;
@@ -1096,28 +1028,6 @@ const sliceCovers = (entry: Record<string, unknown>): string[] => {
 	return Array.isArray(raw) ? raw.filter((c): c is string => typeof c === "string") : [];
 };
 
-/** The verdict directory the deterministic checks and the LLM grade panel share. */
-const VERDICT_DIR = ".rpiv/artifacts/verdicts";
-/** Binary verdict score: a clean pass. The gate keys off `severity`, never this number. */
-const VERDICT_PASS_SCORE = 100;
-/** Binary verdict score: at least one finding. The gate keys off `severity`, never this number. */
-const VERDICT_FAIL_SCORE = 0;
-
-/**
- * A `path:line` (or `path:line-line`) citation in an artifact's prose. Requires a
- * dotted extension so timestamps (`17:13:27`), ratios, and bare `Slice 2:` labels
- * never match — only file references with a real extension are verified.
- *
- * A citation may START with a single dot (`.github/workflows/ci.yml:12`,
- * `.eslintrc.js:3`) — without it, dot-dirs and dotfiles were captured with the
- * dot stripped and guaranteed to fail the floor as a mangled path. The leading
- * dot is taken only when the preceding char is not a word char or another dot
- * (`(?<![\w.])`), and a dotless start only at a word boundary (`(?<!\w)`), so a
- * prose ellipsis (`...packages/x.ts:5`) still yields `packages/x.ts`, never
- * `...packages/x.ts`.
- */
-const FILE_LINE_CITATION_RE = /((?:(?<![\w.])\.)?(?<!\w)[\w][\w./-]*\.[a-zA-Z][a-zA-Z0-9]{0,4}):(\d+)(?:-(\d+))?/g;
-
 /**
  * Verify every `file:line` citation in `body` resolves against the working tree:
  * the cited file must exist AND carry at least the cited line (a range's high end).
@@ -1254,41 +1164,6 @@ const resolveCitationPath = (
 	return undefined;
 };
 
-/**
- * Character-offset spans of fenced code blocks (delimiter lines included), an
- * unterminated fence running to end-of-text. Mirrors the `inFence`/`fenceLen`
- * toggle `countHeadingsOutsideFences` carries so every fence-aware scan agrees
- * on the same boundaries.
- */
-const fencedSpans = (content: string): [number, number][] => {
-	const spans: [number, number][] = [];
-	let inFence = false;
-	let fenceLen = 0;
-	let fenceChar = "";
-	let spanStart = 0;
-	let offset = 0;
-	for (const line of content.split("\n")) {
-		const lineEnd = offset + line.length + 1; // +1 for the split-consumed \n
-		const fence = FENCE_LINE_RE.exec(line);
-		if (fence) {
-			if (!inFence) {
-				inFence = true;
-				fenceLen = fence[1].length;
-				fenceChar = fence[1][0];
-				spanStart = offset;
-			} else if (closesFence(line, fence, fenceChar, fenceLen)) {
-				inFence = false;
-				fenceLen = 0;
-				fenceChar = "";
-				spans.push([spanStart, lineEnd]);
-			}
-		}
-		offset = lineEnd;
-	}
-	if (inFence) spans.push([spanStart, offset]);
-	return spans;
-};
-
 /** Example-path namespaces the skill prompts use in illustrative citations
  *  (`path/to/file.ext:12`, `packages/x/y.ts:42`). Artifacts quote — and models
  *  imitate — these examples in unfenced prose, where the fence skip cannot
@@ -1360,58 +1235,8 @@ const verifyCitations = (body: string, cwd: string): { detail: string; where: st
 	return findings;
 };
 
-/** A structure-dimension finding — the shared shape the deterministic verdict
- * checks emit (`detail` is the actionable message, `where` locates the defect). */
-type StructureFinding = { detail: string; where: string };
-
 /** A dispatched sub-plan basename with its `_cluster-<k>` ordinal resolved. */
 type DispatchedCluster = { path: string; k: number };
-
-/** An `fs` artifact handle (the only handle kind the verdict checks operate on). */
-type FsHandle = { kind: "fs"; path: string };
-
-/**
- * Write the shared `{ dimension: "structure" }` verdict and publish it on an fs
- * artifact. The three deterministic structure checks (`sliceStructureCheck`,
- * `subplanCoverageCheck`, `planCitationCheck`) all emit the SAME verdict shape
- * and basename-keyed JSON write, so it lives here once. `who` is the channel
- * prefix folded into the basename (so a re-run OVERWRITES its own slot —
- * idempotent across fix/reslice/re-dispatch rounds); `handle` is the artifact
- * the check inspected (serialized into `data.artifact` and basename-keyed).
- *
- * The `severity: pass ? "none" : "high"` floor is load-bearing: the gate routes
- * via `allDimensionsPass`/`subplanGatePasses`, whose severity floor silently
- * passes a `pass:false` verdict rated `low`/`none`; a structural defect MUST
- * rate `high` or it ships. The `score` is the binary verdict scale (100 = clean,
- * 0 = finding; the gate keys off `severity`, never this number).
- *
- * `extra` lets a caller stamp additional gate-readable fields onto the verdict
- * data (and the persisted JSON, so the trail records them) — currently only
- * `sliceStructureCheck`'s `citeDischarged` stamp.
- */
-const writeStructureVerdict = (
-	who: string,
-	handle: FsHandle,
-	findings: StructureFinding[],
-	cwd: string,
-	extra?: Record<string, unknown>,
-): Omit<Output, "meta"> => {
-	const pass = findings.length === 0;
-	const data = {
-		dimension: "structure",
-		pass,
-		score: pass ? VERDICT_PASS_SCORE : VERDICT_FAIL_SCORE,
-		severity: pass ? "none" : "high",
-		artifact: handleToString(handle),
-		findings,
-		feedback: pass ? "" : findings.map((f) => f.detail).join(" "),
-		...extra,
-	};
-	const rel = join(VERDICT_DIR, `${who}__${basename(handle.path, ".md")}.json`);
-	mkdirSync(join(cwd, VERDICT_DIR), { recursive: true });
-	writeFileSync(join(cwd, rel), JSON.stringify(data, null, 2), "utf-8");
-	return { kind: "json", artifacts: [{ handle: { kind: "fs", path: rel } }], data };
-};
 
 /**
  * A citation string occurs LIVE in the slice-map text — outside fenced spans
@@ -2321,16 +2146,6 @@ const reconciliationRecords = (
 	return { directives, malformed };
 };
 
-/**
- * The reconcile write-restriction's static allowlist — a conservative test-path
- * classifier. A directive may apply its `find → replace` ONLY to a co-located test
- * file (`*.test.{ts,tsx,js,jsx}`); any other target is flagged and left untouched
- * (fail-closed: golden masters, fixtures, `*.t.ts`, and production sources are NOT
- * auto-applied). Narrow by design — do not widen it to compensate for a weak
- * directive (correctness rests on this neither false-failing a legit test edit
- * nor false-allowing a non-test target).
- */
-const TEST_PATH_RE = /\.test\.[tj]sx?$/;
 const isTestPath = (target: string): boolean => TEST_PATH_RE.test(target);
 
 /**
@@ -3106,6 +2921,45 @@ const PLAN_CONFIRM_FANOUT = gradePanelFanout("plans", PLAN_DIMENSIONS, "plan-ver
 const CODE_CONFIRM_FANOUT = gradePanelFanout("plans", PLAN_DIMENSIONS, "code-verdicts", { confirm: true });
 
 /**
+ * Ship's grade panel — a bespoke `fanout({...})` mirroring `gradePanelFanout`'s
+ * body but binding the roster to `SHIP_DIMENSIONS` DIRECTLY (no
+ * `gateRoster(gateTier(...))` wrap) and dropping the confirm / `priorChannel`
+ * / surgical-fix machinery ship's single-pass grade does not carry. Kept: the
+ * `latestFsArtifact` guard (no plan → no units), the dimension-keyed
+ * `--context` (architecture-fit only, sourced from the front-loaded `research`
+ * artifact), the `--goal` flag for `GOAL_DIMENSIONS` (completeness/
+ * correctness), and the `freshVerdicts` / `latestVerdictPerDimension` /
+ * `dimensionsToRegrade` carry-forward so a re-grade emits only still-pending
+ * dimensions. Tier-independence is structural: the roster never shrinks, so a
+ * light run still grades `architecture-fit`.
+ */
+export const SHIP_DIMENSION_FANOUT = fanout({
+	source: "plans",
+	unit: { by: "dimension-list", pattern: "dimensions" },
+	max: SHIP_DIMENSIONS.length,
+	units: ({ state }) => {
+		const doc = latestFsArtifact(state, "plans");
+		if (doc?.handle.kind !== "fs") return [];
+		const target = handleToString(doc.handle);
+		const research = latestFsArtifact(state, "research");
+		const contextFlag = research?.handle.kind === "fs" ? ` --context ${handleToString(research.handle)}` : "";
+		const goal = latestFsArtifact(state, "goal");
+		const goalFlag = goal?.handle.kind === "fs" ? ` --goal ${handleToString(goal.handle)}` : "";
+		// Tier-independent roster: SHIP_DIMENSIONS verbatim — never gateRoster(gateTier(...)).
+		const roster = SHIP_DIMENSIONS;
+		const latest = latestVerdictPerDimension(freshVerdicts(state.named["ship-verdicts"], target));
+		const risks = planAuthoredRisks(state, "plans");
+		const pending = dimensionsToRegrade(roster, latest, risks);
+		const carryForward = pending.length > 0 ? pending : roster;
+		return carryForward.map((d) => ({
+			prompt: `--dimension ${d} --artifact ${target}${d === "architecture-fit" ? contextFlag : ""}${GOAL_DIMENSIONS.has(d) ? goalFlag : ""}`,
+			label: d,
+			id: `plans-dim-${d}`,
+		}));
+	},
+});
+
+/**
  * Fold the per-dimension verdicts into a gate decision: keep the latest verdict
  * per dimension (verdicts accumulate across fix loops), require all-pass.
  * Deterministic ⇒ resume-safe for a `readsData: false` route.
@@ -3384,6 +3238,21 @@ const codeGatePasses = (state: RunView): boolean => {
 };
 
 /**
+ * Ship's grade gate — the tier-independent fold over `SHIP_DIMENSIONS` reading
+ * the `ship-verdicts` channel. Satisfied when every ship dimension passes
+ * (severity-floored) AND every plan-authored risk flag is ruled pass. Unlike
+ * `planGatePasses`/`codeGatePasses` it folds NO deterministic cite channel —
+ * ship's `plan-cite-check` gate is routed at its own edge — and binds the
+ * roster to `SHIP_DIMENSIONS` verbatim (never `gateRoster(gateTier(...))`), so
+ * the gate consults the same fixed set the panel graded.
+ */
+export const shipGatePasses = (state: RunView): boolean => {
+	const fresh = freshVerdicts(state.named["ship-verdicts"], latestArtifactPath(state, "plans"));
+	const risks = planAuthoredRisks(state, "plans");
+	return allDimensionsPass(fresh, SHIP_DIMENSIONS) && allRiskFlagsPass(fresh, risks);
+};
+
+/**
  * Confirm-before-block: a dimension's FIRST blocking verdict against the
  * current artifact gets ONE independent second judgment before it buys a fix
  * round. Single-judge verdicts observably flap (pass/score/severity disagree
@@ -3444,6 +3313,12 @@ const planVerdictOutcome = verdictOutcome("plan-verdicts");
 // for the object under judgment — the code the gate grades — completing the
 // slice-verdicts / plan-verdicts / code-verdicts parallel.
 const codeVerdictOutcome = verdictOutcome("code-verdicts");
+
+// Ship's grade panel writes its verdicts to a DISTINCT channel (same
+// directory, different artifact basenames) so they never mix with build's
+// plan/code verdicts — named for the workflow, completing the slice-verdicts
+// / plan-verdicts / code-verdicts / ship-verdicts parallel.
+export const shipVerdictOutcome = verdictOutcome("ship-verdicts");
 
 /**
  * Absolute path to rpiv-pi's bundled deterministic stitch script. Resolved off
@@ -3983,6 +3858,165 @@ const buildWorkflow = defineWorkflow({
 	},
 });
 
+/**
+ * Reason strings for ship's two bespoke stop picks — persisted on the
+ * `RoutingDecision` row via `setRouteNote` so `summarizeRun` can surface
+ * "stopped at <gate>: <why>" in the end-of-run recap and toast. `match`/`gate`
+ * edges attach their own no-match diagnostics; only these two `defineRoute`
+ * gates would otherwise stop silently. Best-effort DIAGNOSTICS, not gates:
+ * `allDimensionsPass`/`shipGatePasses` stay the sole routing authorities, and
+ * these mirror their severity floor only to NAME the blockers.
+ */
+const shipCiteStopNote = (state: RunView): string => {
+	const data = state.named["plan-cite-check"]?.at(-1)?.data as { findings?: unknown } | undefined;
+	const n = Array.isArray(data?.findings) ? data.findings.length : 0;
+	return n > 0 ? `plan citation check failed (${n} finding${n === 1 ? "" : "s"})` : "plan citation check failed";
+};
+const shipGradeStopNote = (state: RunView): string => {
+	const fresh = freshVerdicts(state.named["ship-verdicts"], latestArtifactPath(state, "plans"));
+	if (fresh.length === 0) return "no fresh verdicts for the current plan";
+	const risks = planAuthoredRisks(state, "plans");
+	const latest = latestVerdictPerDimension(fresh);
+	const blockers: string[] = [];
+	for (const d of SHIP_DIMENSIONS) {
+		const o = latest.get(d);
+		if (!o) continue;
+		const v = o.data as { pass?: boolean; severity?: string; findings?: unknown };
+		const floored = v.pass === true || v.severity === "low" || v.severity === "none" || anchorNitsOnly(v);
+		if (!floored) blockers.push(`${d} failed (${v.severity ?? "unrated"})`);
+		else if (verdictRiskRulings(o).some((r) => !rulingEffectivePass(r, risks.get(r.id))))
+			blockers.push(`${d} risk flag failed`);
+	}
+	return blockers.length > 0 ? blockers.join(", ") : "gate failed";
+};
+
+// Named (not inline) so the stop branch can self-reference for setRouteNote —
+// the same closure-over-own-binding pattern gate()/match() use internally.
+// Citation-floor gate. Pass ⇒ grade; fail ⇒ STOP (no fix arm — the lightweight
+// preset terminates on any red gate). The route folds `allDimensionsPass` over
+// the stage's OWN published channel, NOT `match("verdict", …)`:
+// `writeStructureVerdict` (the floor's envelope) carries no `verdict` field, so
+// a verdict match would misread — this mirrors build's `planGatePasses` first
+// clause. `readsData: false` — the route consults the deterministic verdict
+// channel only.
+const shipCiteGate: EdgeFn = defineRoute(
+	["grade", "stop"],
+	({ state }) => {
+		if (allDimensionsPass(state.named["plan-cite-check"])) return "grade";
+		setRouteNote(shipCiteGate, shipCiteStopNote(state));
+		return "stop";
+	},
+	{ readsData: false },
+);
+// Quality gate PRE-implement. `shipGatePasses` (the bespoke fold over
+// SHIP_DIMENSIONS + risk flags on the `ship-verdicts` channel) does NOT re-fold
+// the citation floor; this edge is the sole gate. Pass ⇒ implement; fail ⇒
+// STOP — no confirm/snapshot/fix loop.
+const shipGradeGate: EdgeFn = defineRoute(
+	["implement", "stop"],
+	({ state }) => {
+		if (shipGatePasses(state)) return "implement";
+		setRouteNote(shipGradeGate, shipGradeStopNote(state));
+		return "stop";
+	},
+	{ readsData: false },
+);
+
+/**
+ * ship — the lightweight `/wf` preset: the no-ceremony path for small-to-
+ * midsize tasks whose approach is obvious. goal → research → plan →
+ * plan-cite-check → grade → implement → implement-scope-check → reconcile →
+ * validate → commit, stop-on-fail at every gate with NO backward edges: a red
+ * gate terminates the run (the agent hand-repairs and re-invokes) instead of
+ * looping a fix cycle. Research stays front-loaded — a ≤2-subagent grounding
+ * pass (SHIP_RESEARCH_PROMPT, not a full `/skill:research` run) — because the
+ * single PRE-implement grade's architecture-fit dimension needs its artifact as
+ * `--context`. That grade is tier-independent: the bespoke SHIP_DIMENSION_FANOUT
+ * always grades the full correctness/completeness/architecture-fit roster (no
+ * gateTier/gateRoster light-tier drop), and SHIP's gate folds risk flags without
+ * re-folding the citation floor (that floor folds at its own edge).
+ */
+const shipWorkflow = defineWorkflow({
+	name: "ship",
+	description:
+		"Ship, unsliced: capture the verbatim brief as a goal artifact → ground it with at most two targeted codebase-analyzer dispatches (no /skill:research) → one lightweight quick-plan pass → deterministic citation floor → single tier-independent quality gate (correctness/completeness/architecture-fit, stop-on-fail) → implement → implement-scope-check → reconcile → validate → commit. Every gate terminates the run on fail; no fix loops.",
+	start: "goal",
+	stages: {
+		// build's verbatim goal capture — the brief on its own channel, plus the
+		// run-start pre-existing-dirty snapshot the scope-check subtracts.
+		goal: produces.script({ run: captureGoal }),
+		// The lean grounding pass — SHIP_RESEARCH_PROMPT (a custom prompt, NOT
+		// /skill:research): ≤2 sequential codebase-analyzer subagents, then one
+		// grounding doc under .rpiv/artifacts/research/. A prompt stage, so the
+		// stage name `research` drives outcome derivation (research contract →
+		// `research` bucket) exactly as build's RESEARCH_BRIEF_PROMPT stage does.
+		research: produces({ prompt: SHIP_RESEARCH_PROMPT }),
+		// The lightweight planner — quick-plan: ONE targeted
+		// codebase-pattern-finder dispatch, one `status: ready` plan, no risks
+		// frontmatter, no multi-slice decomposition. Derives its `plans` outcome
+		// from the quick-plan contract (artifactKind: plan). Reads BOTH channels
+		// explicitly (`--research <path> --goal <path>`) — without `goal` the
+		// stage falls to the rolling primary and the planner sees only the
+		// research doc, whose grounding routinely narrows the brief; the grade
+		// panel's completeness dimension anchors on the VERBATIM goal, so the
+		// planner must anchor on the same artifact to defer narrowed-out asks
+		// explicitly instead of silently inheriting the drop.
+		plan: produces({ skill: "quick-plan", reads: ["research", "goal"] }),
+		// Deterministic citation floor BEFORE the LLM gate — build's verifier
+		// verbatim. A fabricated `file:line` fails structurally and STOPs the run.
+		"plan-cite-check": produces.script({ reads: ["plans"], run: planCitationCheck("plan-cite-check") }),
+		// Single PRE-implement grade over the fixed three-dimension roster
+		// (SHIP_DIMENSION_FANOUT — tier-independent, no confirm/snapshot arms);
+		// verdicts on the `ship-verdicts` channel. `research` is read so the
+		// architecture-fit unit threads it as --context; `goal` so
+		// completeness/correctness anchor on the verbatim brief.
+		grade: produces({
+			skill: "grade",
+			loop: SHIP_DIMENSION_FANOUT,
+			outcome: shipVerdictOutcome,
+			reads: ["plans", "research", "goal"],
+		}),
+		// Dep-gated DAG implement — build's lane verbatim.
+		implement: acts({ loop: IMPLEMENT_DAG_FANOUT, reads: ["plans"] }),
+		// Lane-level scope floor — build's latest-only variant (vet uses the
+		// union variant for its fix loop; ship has no loop, so the latest plan's
+		// declared write-set is the whole contract). Pass ⇒ reconcile; fail ⇒ STOP.
+		"implement-scope-check": produces.script({ reads: ["plans", "goal"], run: implementScopeCheck }),
+		// Deterministic post-implement reconciliation — build's run-function
+		// verbatim. Pass ⇒ validate; fail/missing ⇒ STOP (no fallback).
+		reconcile: produces.script({ reads: ["plans"], run: reconcile }),
+		validate: produces({ prompt: VALIDATE_GOAL_PROMPT }),
+		commit: acts({ prompt: COMMIT_BASELINE_PROMPT, outcome: gitCommitOutcome }),
+	},
+	edges: {
+		goal: "research",
+		research: "plan",
+		plan: "plan-cite-check",
+		// Both gates are the named EdgeFns above — they attach a stop-reason
+		// ROUTE_NOTE the recap surfaces; routing semantics are unchanged.
+		"plan-cite-check": shipCiteGate,
+		grade: shipGradeGate,
+		implement: "implement-scope-check",
+		// Scope floor gate — build's route verbatim: the sole path onward is an
+		// explicit `verdict: "pass"`; a fail (undeclared write) or a missing
+		// verdict is terminal STOP. Sourced from the stage's own channel via the
+		// `from` form (suppresses the READS_DATA outputSchema lint).
+		"implement-scope-check": match("verdict", { reconcile: "pass" }, { from: "implement-scope-check" }),
+		// Reconciliation gate — build's route verbatim: pass ⇒ validate;
+		// fail/missing ⇒ STOP (plan-vs-tree drift the agent reconciles manually).
+		reconcile: match("verdict", { validate: "pass" }, { from: "reconcile" }),
+		// Validate gate — build's validate edge (match verdict pass⇒commit,
+		// from "validation") minus the `validate-fix` arm: `pass` ⇒ commit; `fail`
+		// or missing ⇒ STOP — deliberately NO validate-fix/remediate repair arm
+		// (the lightweight preset does not loop). NOT vet's tail: vet's validate
+		// routes to code-review, which gates back to blueprint (a bounded backward
+		// loop, not stop-on-fail). Sourced from validate's published verdict
+		// channel (`from: "validation"`).
+		validate: match("verdict", { commit: "pass" }, { from: "validation" }),
+		commit: "stop",
+	},
+});
+
 // ===========================================================================
 // Exports
 // ===========================================================================
@@ -3990,4 +4024,4 @@ const buildWorkflow = defineWorkflow({
 // Position 0 is load-bearing: `build` is the default `/wf` workflow when no
 // project/user config sets one (resolve-default.ts resolves
 // `Map.keys().next().value`), so it MUST stay first in this array.
-export const builtInWorkflows: readonly Workflow[] = [buildWorkflow, vetWorkflow, polishWorkflow];
+export const builtInWorkflows: readonly Workflow[] = [buildWorkflow, vetWorkflow, polishWorkflow, shipWorkflow];
