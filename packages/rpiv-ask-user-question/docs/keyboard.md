@@ -24,6 +24,13 @@ numbered `Type something.` row; it does not commit or toggle it. The generated `
 has no number and remains excluded. On a multi-question dialog's Submit tab, `1` focuses
 Submit and `2` focuses Cancel; press `Enter` or `Space` to activate the focused action.
 
+The table names the default keys; the dialog actually follows your Pi keybindings.
+Confirm listens to both `tui.select.confirm` and `tui.input.submit`, and a key bound to
+`tui.input.newLine` always inserts a newline even if it also matches confirm. So a
+Slack-style configuration — `enter` folded into `tui.input.newLine`, submit moved to
+`ctrl+enter` — keeps working: `enter` breaks lines, and your submit key confirms
+everywhere `Enter` does.
+
 In a multi-select question, `Enter` on a regular row toggles its checkbox exactly like
 `Space` — it does not submit. Committing the question means focusing the `Next` row and
 pressing `Enter`. That is deliberate: it makes `Enter` a zero-cost way to flip boxes

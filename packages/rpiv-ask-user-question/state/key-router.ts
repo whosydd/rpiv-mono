@@ -6,6 +6,7 @@ import type { QuestionnaireRuntime, QuestionnaireState } from "./state.js";
 const KEYBIND_UP = "tui.select.up";
 const KEYBIND_DOWN = "tui.select.down";
 const KEYBIND_CONFIRM = "tui.select.confirm";
+const KEYBIND_SUBMIT = "tui.input.submit";
 const KEYBIND_CANCEL = "tui.select.cancel";
 const KEYBIND_NEW_LINE = "tui.input.newLine";
 const KEYBIND_EDITOR_UP = "tui.editor.cursorUp";
@@ -37,6 +38,23 @@ export type QuestionnaireAction =
 
 export interface QuestionnaireKeybindings {
 	matches(data: string, name: string): boolean;
+}
+
+// Confirm has two semantic sources: `tui.select.confirm` (the select-list
+// default) and `tui.input.submit` (the user's "send" key). A Slack-style configuration folds
+// `enter` into `tui.input.newLine` and moves submit elsewhere (e.g. `ctrl+enter`);
+// the newline checks below stay first, so without the submit source every confirm
+// branch would be shadowed by the collision and no key could confirm (#156). With
+// pi defaults both names resolve to `enter`, so matching either is equivalent.
+function isConfirm(kb: QuestionnaireKeybindings, data: string): boolean {
+	return kb.matches(data, KEYBIND_CONFIRM) || kb.matches(data, KEYBIND_SUBMIT);
+}
+
+// Space also confirms, but only in the single-select confirm and Submit-picker paths:
+// in the notes editor and the inline `Type something.` input it must type a literal
+// space character instead.
+function isConfirmKey(data: string, kb: QuestionnaireKeybindings): boolean {
+	return data === SPACE_KEY || isConfirm(kb, data);
 }
 
 export function wrapTab(index: number, total: number): number {
@@ -161,10 +179,6 @@ function submitShortcutAction(data: string): QuestionnaireAction | null {
 	return null;
 }
 
-function isConfirmKey(data: string, keybindings: QuestionnaireKeybindings): boolean {
-	return data === SPACE_KEY || keybindings.matches(data, KEYBIND_CONFIRM);
-}
-
 export function routeKey(data: string, state: QuestionnaireState, runtime: QuestionnaireRuntime): QuestionnaireAction {
 	const kb = runtime.keybindings;
 
@@ -209,7 +223,7 @@ export function routeKey(data: string, state: QuestionnaireState, runtime: Quest
 	if (state.notesVisible) {
 		if (kb.matches(data, KEYBIND_CANCEL)) return { kind: "notes_exit" };
 		if (kb.matches(data, KEYBIND_NEW_LINE)) return { kind: "notes_forward", data };
-		if (kb.matches(data, KEYBIND_CONFIRM)) return { kind: "notes_exit" };
+		if (isConfirm(kb, data)) return { kind: "notes_exit" };
 		return { kind: "notes_forward", data };
 	}
 
@@ -217,7 +231,7 @@ export function routeKey(data: string, state: QuestionnaireState, runtime: Quest
 		// Newline takes precedence over confirmation if a user configuration binds
 		// the same physical key to both semantic actions.
 		if (kb.matches(data, KEYBIND_NEW_LINE)) return { kind: "ignore" };
-		if (kb.matches(data, KEYBIND_CONFIRM)) {
+		if (isConfirm(kb, data)) {
 			const answer = buildSingleSelectAnswer(state, runtime);
 			if (!answer) return { kind: "ignore" };
 			return { kind: "confirm", answer, autoAdvanceTab: computeAutoAdvanceTab(state, runtime) };
@@ -296,7 +310,7 @@ export function routeKey(data: string, state: QuestionnaireState, runtime: Quest
 			if (focusedMeta?.activatesInputMode) return { kind: "ignore" };
 			return { kind: "toggle", index: state.optionIndex };
 		}
-		if (kb.matches(data, KEYBIND_CONFIRM)) {
+		if (isConfirm(kb, data)) {
 			// Enter on the "Type something." row is handled by the inputMode block above
 			// (→ confirm kind:"custom"). Defensive: never enter the toggle/multi_confirm
 			// path for an inputMode-activating row.

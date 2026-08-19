@@ -9,7 +9,7 @@ Node built-ins only — plus one cross-tree workspace import: `check-slice-overl
 ## Consumers
 - **Developers**: `npm run release:{patch|minor|major}` or `node scripts/release.mjs <x.y.z>`
 - **Root npm scripts**: `version:*` chains call the sync script after `npm version -ws`
-- **CI** (`.github/workflows/ci.yml`): runs `npm run check` + `npm run coverage` on push/PR (Node 22/24) — but publishing stays **local-only by design**: no workflow runs `npm publish`
+- **CI** (`.github/workflows/ci.yml`): runs `npm run check:decision-codes` + `npm run check` + `npm run coverage` on push/PR (Node 22/24) — but publishing stays **local-only by design**: no workflow runs `npm publish`
 - **Husky hooks**: `pre-commit` runs `npm run check:decision-codes` fail-fast, then `npm run check` — gating the clean-tree precondition the release script asserts; `pre-push` (`npm run coverage`) ensures a release-tag push has green tests
 
 ## Module Structure
@@ -21,7 +21,7 @@ check-no-decision-codes.mjs — Pre-commit guard: no parenthesized decision-code
 ```
 
 ## Fresh-Resolution Hazard (why root devDependencies are pinned EXACT)
-Both release paths delete `package-lock.json` + `node_modules` and reinstall ("lockfile honesty") — so on release day, caret specs re-resolve to whatever npm serves. This broke the v2.0.0 release twice: biome `^2.5.0` → 2.5.5 (new lint errors failed pre-commit) and pi `^0.80.5` → 0.80.10 (`modelRegistry` → `modelRuntime` rename broke tsc). The root `devDependencies` are therefore pinned **exact** (biome, tsc, vitest, coverage, pi-*, typebox, husky, shx) — bump them deliberately in a normal commit, never let a release float them. The `@earendil-works/pi-*` trio stays at 0.80.5 until the `modelRuntime` migration lands. Transitive deps can still drift — the coverage preflight is the backstop.
+Both release paths delete `package-lock.json` + `node_modules` and reinstall ("lockfile honesty") — so on release day, caret specs re-resolve to whatever npm serves. This broke the v2.0.0 release twice: biome `^2.5.0` → 2.5.5 (new lint errors failed pre-commit) and pi `^0.80.5` → 0.80.10 (`modelRegistry` → `modelRuntime` rename broke tsc). The root `devDependencies` are therefore pinned **exact** (biome, tsc, vitest, coverage, pi-*, typebox, husky, shx) — bump them deliberately in a normal commit, never let a release float them. The `@earendil-works/pi-*` trio is held pre-0.80.10 (currently pinned exact at 0.80.6, mirrored in root `overrides`) until the `modelRuntime` migration lands. Transitive deps can still drift — the coverage preflight is the backstop.
 
 ## Lockstep Invariant Enforcement
 `sync-versions.js` is **all-or-nothing**: if any two workspace packages have drifted to different versions, it fails the build before writing anything. `peerDependencies` are deliberately **untouched** — the zero-cross-imports contract requires they stay `"*"`.
@@ -37,7 +37,7 @@ Every shell command runs through a single wrapper that **echoes the command and 
 - **Reinstate**: regex-anchored injection of a fresh `[Unreleased]` block above the first version heading — **not** idempotent by itself; the pipeline guarantees exactly-one invocation per release
 
 ## Decision-Code Contamination Guard
-`check-no-decision-codes.mjs` walks `packages/rpiv-workflow` and `packages/rpiv-pi/extensions/rpiv-core` (`*.ts` only, `node_modules` skipped) and exits 1 on any **parenthesized, case-sensitive** decision-code citation — `(C#|T#|D#|G#|FR#|A#|M#|Slice N|Phase X|Problem N|Decision N|concern-X)`. The invariant: design-doc decision-codes live in `.rpiv/artifacts/`, never in committed `.ts`. The parens + uppercase gate and `*.ts`-only scope are deliberate — they self-filter plan fixtures in test data and legit `.md` uses, so there is **no allowlist to maintain**. Wired as `npm run check:decision-codes` (root `package.json`) and the first pre-commit step.
+`check-no-decision-codes.mjs` walks `packages/rpiv-workflow`, `packages/rpiv-pi/extensions/rpiv-core`, and `packages/rpiv-advisor` (`*.ts` only, `node_modules` skipped) and exits 1 on any **parenthesized, case-sensitive** decision-code citation — `(C#|T#|D#|G#|FR#|A#|M#|L#-#|review I#|Slice N|Phase X|Problem N|Decision N|concern-X)`. Review-citation codes (`L#-#`, `review I#`) are additionally flagged anywhere *inside* a parenthesized run, so an article prefix (`(the pre-L4-01 behavior)`) cannot shelter them. The invariant: design-doc decision-codes live in `.rpiv/artifacts/`, never in committed `.ts`. The parens + uppercase gate and `*.ts`-only scope are deliberate — they self-filter plan fixtures in test data and legit `.md` uses, so there is **no allowlist to maintain**. Wired as `npm run check:decision-codes` (root `package.json`), the first pre-commit step, and a CI step before `npm run check`.
 
 ## Architectural Boundaries
 - **NO third-party deps** — Node built-ins + shell-outs only; semver comparison is hand-rolled rather than depending on an npm package
