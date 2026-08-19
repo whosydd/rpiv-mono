@@ -40,8 +40,8 @@ export interface QuestionnaireKeybindings {
 	matches(data: string, name: string): boolean;
 }
 
-// Confirm has two semantic sources: `tui.select.confirm` (the select-list
-// default) and `tui.input.submit` (the user's "send" key). A Slack-style configuration folds
+// Confirm has two semantic sources: `tui.select.confirm` (the select-list default)
+// and `tui.input.submit` (the user's "send" key). A Slack-style configuration folds
 // `enter` into `tui.input.newLine` and moves submit elsewhere (e.g. `ctrl+enter`);
 // the newline checks below stay first, so without the submit source every confirm
 // branch would be shadowed by the collision and no key could confirm (#156). With
