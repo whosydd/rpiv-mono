@@ -2,7 +2,9 @@ name: Sync upstream
 
 on:
   schedule:
-    # GitHub Actions cron expressions use UTC.
+    # Poll for new upstream releases. GitHub Actions cannot subscribe to another
+    # repository's release events, so a release-gated poll (cron, UTC) is how
+    # "sync on each release" is implemented without upstream cooperation.
     - cron: "0 0 * * *"
   workflow_dispatch:
 
@@ -23,7 +25,7 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Merge upstream main
+      - name: Sync on new upstream release
         env:
           UPSTREAM_URL: https://github.com/juicesharp/rpiv-mono.git
         run: |
@@ -31,12 +33,21 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream "$UPSTREAM_URL" 2>/dev/null || git remote set-url upstream "$UPSTREAM_URL"
-          git fetch upstream main
+          git fetch upstream main --tags
 
-          if git merge-base --is-ancestor upstream/main HEAD; then
-            echo "Fork main already contains upstream/main."
+          # Only merge when upstream has cut a release (tag matching `v*`) that the
+          # fork does not yet contain. Daily upstream commits are ignored, so the
+          # fork only churns on actual releases instead of every push to upstream/main.
+          LATEST_TAG="$(git describe --tags --abbrev=0 --match 'v*' upstream/main 2>/dev/null || true)"
+          if [ -z "$LATEST_TAG" ]; then
+            echo "No upstream release tag reachable from upstream/main; nothing to sync."
+            exit 0
+          fi
+          if git merge-base --is-ancestor "$LATEST_TAG" HEAD; then
+            echo "Fork main already contains upstream release $LATEST_TAG."
             exit 0
           fi
 
+          echo "New upstream release $LATEST_TAG detected; merging upstream/main."
           git merge --no-edit upstream/main
           git push origin HEAD:main
