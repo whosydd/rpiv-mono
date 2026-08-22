@@ -18,7 +18,16 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { appendFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { createMockSessionChain, mockAssistantMessage } from "@juicesharp/rpiv-test-utils";
@@ -923,6 +932,7 @@ describe("vet workflow", () => {
 				"blueprint",
 				"implement",
 				"implement-scope-check",
+				"scope-quarantine",
 				"reconcile",
 				"validate",
 				"commit",
@@ -949,9 +959,11 @@ describe("vet workflow", () => {
 			expect(edges.goal).toBe("code-review");
 			expect(edges.blueprint).toBe("implement");
 			expect(edges.implement).toBe("implement-scope-check");
-			// The scope-check route is byte-for-byte Phase 3's build route (the `from`
-			// form suppresses the outputSchema lint → no schema on the script stage).
+			// The scope-check route is the shared tiered scopeFloorGate (readsData:
+			// false suppresses the outputSchema lint → no schema on the script stage).
 			expect(wf.stages["implement-scope-check"]?.outputSchema).toBeUndefined();
+			// Quarantine's re-entry hop is a plain string edge (non-counted).
+			expect(edges["scope-quarantine"]).toBe("implement-scope-check");
 			expect(edges.validate).toBe("code-review"); // backward review-fix loop INTACT
 			expect(edges.commit).toBe("stop");
 		});
@@ -1716,6 +1728,69 @@ describe("ship grade panel (tier-independent roster bypass)", () => {
 			});
 			expect(units).toEqual([]);
 		});
+
+		// Advisory citation findings reach the correctness grader: the cite gate
+		// upstream passed (a blocking finding STOPs before grade), so a
+		// findings-bearing plan-cite-check verdict here is advisory by
+		// construction and threads as --cite-check on the correctness unit ONLY.
+		it("threads --cite-check to the correctness unit when the cite floor recorded findings", async () => {
+			const CITE = ".rpiv/artifacts/verdicts/plan-cite-check__p.json";
+			const units = await SHIP_DIMENSION_FANOUT.units({
+				cwd: "/repo",
+				artifact: undefined,
+				state: {
+					named: {
+						plans: [dataOut(PLAN, { phase_count: 1 })],
+						research: [out(".rpiv/artifacts/research/r.md")],
+						goal: [out(".rpiv/artifacts/goal/goal.md")],
+						"plan-cite-check": [
+							dataOut(CITE, {
+								dimension: "structure",
+								pass: false,
+								severity: "low",
+								findings: [{ detail: "Unbacked citation dup.ts:5", where: "dup.ts:5", advisory: true }],
+							}),
+						],
+					},
+				} as unknown as RunView,
+			});
+			const correctness = units.find((u) => u.label === "correctness");
+			expect(correctness?.prompt).toContain(`--cite-check ${CITE}`);
+			expect(units.filter((u) => u.label !== "correctness").every((u) => !u.prompt.includes("--cite-check"))).toBe(
+				true,
+			);
+		});
+
+		it("omits --cite-check when the cite floor is clean or the channel is absent", async () => {
+			const base = {
+				plans: [dataOut(PLAN, { phase_count: 1 })],
+				research: [out(".rpiv/artifacts/research/r.md")],
+				goal: [out(".rpiv/artifacts/goal/goal.md")],
+			};
+			const clean = await SHIP_DIMENSION_FANOUT.units({
+				cwd: "/repo",
+				artifact: undefined,
+				state: {
+					named: {
+						...base,
+						"plan-cite-check": [
+							dataOut(".rpiv/artifacts/verdicts/plan-cite-check__p.json", {
+								dimension: "structure",
+								pass: true,
+								severity: "none",
+								findings: [],
+							}),
+						],
+					},
+				} as unknown as RunView,
+			});
+			const absent = await SHIP_DIMENSION_FANOUT.units({
+				cwd: "/repo",
+				artifact: undefined,
+				state: { named: base } as unknown as RunView,
+			});
+			expect([...clean, ...absent].every((u) => !u.prompt.includes("--cite-check"))).toBe(true);
+		});
 	});
 
 	describe("shipGatePasses", () => {
@@ -1831,6 +1906,37 @@ describe("ship grade panel (tier-independent roster bypass)", () => {
 			});
 			expect(edge({ state: s, output: undefined })).toBe("grade");
 			expect(takeRouteNote(edge)).toBeUndefined();
+		});
+
+		it("plan-cite-check advisory-only verdict (severity low) rides through to grade", () => {
+			// The severity tier's ship-side contract: ambiguity/drift rate `low`,
+			// allDimensionsPass floors it, and the run proceeds to grade instead of
+			// terminating over a resolver limitation.
+			const edge = edgeOf("plan-cite-check");
+			const s = state({
+				"plan-cite-check": [
+					{
+						artifacts: [],
+						data: { dimension: "structure", pass: false, severity: "low", findings: [{ advisory: true }] },
+					},
+				],
+			});
+			expect(edge({ state: s, output: undefined })).toBe("grade");
+			expect(takeRouteNote(edge)).toBeUndefined();
+		});
+
+		it("plan-cite-check stop note counts only the blocking findings", () => {
+			const edge = edgeOf("plan-cite-check");
+			const s = state({
+				"plan-cite-check": [
+					{
+						artifacts: [],
+						data: { dimension: "structure", pass: false, severity: "high", findings: [{ advisory: true }, {}] },
+					},
+				],
+			});
+			expect(edge({ state: s, output: undefined })).toBe("stop");
+			expect(takeRouteNote(edge)).toBe("plan citation check failed (1 finding)");
 		});
 	});
 
@@ -2074,6 +2180,28 @@ describe("build slice-check (deterministic floor)", () => {
 		expect(data.pass).toBe(false);
 		expect(String(data.feedback)).toMatch(/Unbacked citation/);
 		expect(String(data.feedback)).toMatch(/does-not-exist\.ts:42/);
+	});
+
+	it("a `..`-escaping citation to an EXISTING out-of-tree file is unbacked, not backed", () => {
+		// Containment: direct resolution must not confirm a file outside cwd — an
+		// existing out-of-tree target would read as a backed citation (and leak its
+		// line count). The escape falls through to the suffix fallback, which finds
+		// no tree file ⇒ ordinary unbacked finding. FAILS without the guard.
+		const escapeName = `${basename(tmpDir)}-cite-escape.md`;
+		const outsideFile = join(tmpDir, "..", escapeName); // a tmpDir SIBLING — outside cwd
+		writeFileSync(outsideFile, "line1\nline2\nline3\n");
+		try {
+			const rel = ".rpiv/artifacts/slices/cite-escape.md";
+			const m = write(
+				rel,
+				`---\nstatus: ready\nslice_count: 1\nslices:\n  - { n: 1, title: A, deps: [] }\n---\n## Slice 1: A\n**Draws on:** x/../../${escapeName}:2\n`,
+			);
+			const data = runOn(m);
+			expect(data.pass).toBe(false);
+			expect(String(data.feedback)).toMatch(/Unbacked citation/);
+		} finally {
+			rmSync(outsideFile, { force: true });
+		}
 	});
 
 	it("fails on a file:line citation past end-of-file", () => {
@@ -3490,6 +3618,59 @@ describe("plan-time coverage floor (verifyPhaseFilesCoverage via plan-cite-check
 		expect(data.findings).toEqual([]);
 	});
 
+	it("ignores a dotted identifier in a Changes bullet — a method name is not a file", () => {
+		// `deps.finalize` cost a live run a blocking coverage finding and a full
+		// code-fix round; the extension bound (1–5 chars) rejects it.
+		const rel = ".rpiv/artifacts/plans/p.md";
+		const data = runOn(
+			write(
+				rel,
+				`---\nstatus: ready\nphase_count: 1\nphases:\n  - { n: 1, title: One, files: [] }\n---\n# Plan\n## Phase 1: One\n### Changes\n- \`deps.finalize\` — call it after the retry fold\n`,
+			),
+		);
+		expect(data.pass).toBe(true);
+		expect(data.findings).toEqual([]);
+	});
+
+	it("ignores a backticked-path bullet outside a Changes section — references are not writes", () => {
+		const rel = ".rpiv/artifacts/plans/p.md";
+		const data = runOn(
+			write(
+				rel,
+				`---\nstatus: ready\nphase_count: 1\nphases:\n  - { n: 1, title: One, files: [] }\n---\n# Plan\n## Phase 1: One\n### Context\n- \`src/foo.ts\` — mirror this pattern\n`,
+			),
+		);
+		expect(data.pass).toBe(true);
+		expect(data.findings).toEqual([]);
+	});
+
+	it("counts a bullet under a **Changes**: field line (blueprint's per-file form)", () => {
+		const rel = ".rpiv/artifacts/plans/p.md";
+		const data = runOn(
+			write(
+				rel,
+				`---\nstatus: ready\nphase_count: 1\nphases:\n  - { n: 1, title: One, files: [] }\n---\n# Plan\n## Phase 1: One\n**Changes**: MODIFY —\n- \`src/foo.ts\` — add the thing\n`,
+			),
+		);
+		expect(data.pass).toBe(false);
+		expect(findingDetails(data)).toMatch(/src\/foo\.ts/);
+	});
+
+	it("covers a bare-basename body form via whole-segment suffix against the declared files:", () => {
+		// `#### 1. config.ts` with files: [packages/x/config.ts] used to be an
+		// unfixable gap (exact-match only) whose remedy text would pollute files:
+		// with the bare name.
+		const rel = ".rpiv/artifacts/plans/p.md";
+		const data = runOn(
+			write(
+				rel,
+				`---\nstatus: ready\nphase_count: 1\nphases:\n  - { n: 1, title: One, files: ["packages/x/config.ts"] }\n---\n# Plan\n## Phase 1: One\n#### 1. config.ts\n**File**: \`config.ts\`\n`,
+			),
+		);
+		expect(data.pass).toBe(true);
+		expect(data.findings).toEqual([]);
+	});
+
 	it("flags an undeclared extensionless write (Makefile) — the extension heuristic must not drop it", () => {
 		const rel = ".rpiv/artifacts/plans/p.md";
 		const data = runOn(
@@ -3840,6 +4021,145 @@ describe("declared-files citation tiebreak (verifyCitations via plan-cite-check)
 		);
 		expect(data.pass).toBe(true);
 		expect(data.findings).toEqual([]);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Citation-floor severity tier — advisory findings (ambiguity, line drift past
+// EOF) rate the structure verdict `low`, which the gates' allDimensionsPass
+// severity floor rides through, so a loop-less preset RECORDS them without
+// stopping (the run history's terminal cite stops were all advisory shapes,
+// none a fabrication). A citation resolving to NOTHING — the one
+// fabrication-shaped category — still rates `high` and blocks, as does a
+// `files:` coverage gap. Exercised through plan-cite-check.
+// ---------------------------------------------------------------------------
+describe("citation-floor severity tier (advisory vs blocking via plan-cite-check)", () => {
+	let tmpDir: string;
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "rpiv-cite-tier-"));
+	});
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	const citeCheckRun = () => {
+		const stage = findWorkflow("build").stages["plan-cite-check"];
+		if (!stage?.run) throw new Error("build plan-cite-check stage has no run function");
+		return stage.run as (ctx: { cwd: string; input?: undefined; state: RunView }) => {
+			data: Record<string, unknown>;
+		};
+	};
+	const write = (rel: string, body: string) => {
+		const parts = rel.split("/");
+		mkdirSync(join(tmpDir, ...parts.slice(0, -1)), { recursive: true });
+		writeFileSync(join(tmpDir, rel), body);
+		return { artifacts: [{ handle: fsHandle(rel) }], data: undefined, kind: "", meta: {} };
+	};
+	const runOn = (plan: ReturnType<typeof write>) =>
+		citeCheckRun()({ cwd: tmpDir, input: undefined, state: { named: { plans: [plan] } } as unknown as RunView }).data;
+	const findings = (data: Record<string, unknown>) =>
+		(data.findings as { detail: string; where: string; advisory?: boolean }[] | undefined) ?? [];
+	const dupFiles = () => {
+		mkdirSync(join(tmpDir, "a"), { recursive: true });
+		mkdirSync(join(tmpDir, "b"), { recursive: true });
+		writeFileSync(join(tmpDir, "a/dup.ts"), Array.from({ length: 50 }, (_, i) => `l${i}`).join("\n"));
+		writeFileSync(join(tmpDir, "b/dup.ts"), Array.from({ length: 50 }, (_, i) => `l${i}`).join("\n"));
+	};
+	const plan = (body: string) => write(".rpiv/artifacts/plans/p.md", body);
+	const fm = (files: string) =>
+		`---\nstatus: ready\nphase_count: 1\nphases:\n  - { n: 1, title: One, files: [${files}] }\n---\n# Plan\n## Phase 1: One\n`;
+
+	it("rates an ambiguous-only verdict `low` (advisory) — recorded, never gate-blocking", () => {
+		dupFiles();
+		const data = runOn(plan(`${fm("")}Retype the constant (dup.ts:5).\n`));
+		expect(data.pass).toBe(false);
+		expect(data.severity).toBe("low");
+		expect(findings(data)).toHaveLength(1);
+		expect(findings(data)[0].advisory).toBe(true);
+	});
+
+	it("rates a line-past-EOF-only verdict `low` (drift is advisory)", () => {
+		mkdirSync(join(tmpDir, "src"), { recursive: true });
+		writeFileSync(join(tmpDir, "src/tiny.ts"), "a\nb\nc\n"); // 4 lines
+		const data = runOn(plan(`${fm('"src/tiny.ts"')}Retype the constant (src/tiny.ts:900).\n`));
+		expect(data.pass).toBe(false);
+		expect(data.severity).toBe("low");
+		expect(findings(data)[0].advisory).toBe(true);
+	});
+
+	it("rates a resolves-to-nothing citation `low` — every citation-resolution finding is advisory", () => {
+		// The run-history audit: the no-match population was garbled-but-real
+		// paths, skipped-tree files, and fixture prose — zero fabrications. The
+		// grade panel adjudicates via --cite-check; the floor records only.
+		const data = runOn(plan(`${fm("")}See src/does-not-exist.ts:42 for the footing.\n`));
+		expect(data.pass).toBe(false);
+		expect(data.severity).toBe("low");
+		expect(findings(data)[0].advisory).toBe(true);
+	});
+
+	it("rates a mixed verdict `high` — a coverage gap outranks advisory citation findings", () => {
+		dupFiles();
+		const data = runOn(
+			plan(`${fm("")}Retype the constant (dup.ts:5).\n### Changes\n- \`src/foo.ts\` — add the thing\n`),
+		);
+		expect(data.pass).toBe(false);
+		expect(data.severity).toBe("high");
+		const byTier = new Set(findings(data).map((f) => f.advisory === true));
+		expect(byTier).toEqual(new Set([true, false]));
+	});
+
+	it("resolves a guidance-tree suffix citation (.rpiv/guidance is carved back into the walk)", () => {
+		mkdirSync(join(tmpDir, ".rpiv/guidance/packages/rpiv-workflow/sessions"), { recursive: true });
+		writeFileSync(
+			join(tmpDir, ".rpiv/guidance/packages/rpiv-workflow/sessions/architecture.md"),
+			Array.from({ length: 60 }, (_, i) => `l${i}`).join("\n"),
+		);
+		const data = runOn(plan(`${fm("")}Update the contract note (sessions/architecture.md:33).\n`));
+		expect(data.pass).toBe(true);
+		expect(data.findings).toEqual([]);
+	});
+
+	it("still never resolves into .rpiv/artifacts (stale artifact copies stay invisible)", () => {
+		mkdirSync(join(tmpDir, ".rpiv/artifacts/priors/sub"), { recursive: true });
+		writeFileSync(join(tmpDir, ".rpiv/artifacts/priors/sub/only-here.md"), "a\nb\nc\n");
+		const data = runOn(plan(`${fm("")}See sub/only-here.md:2 for the prior.\n`));
+		expect(data.pass).toBe(false);
+		expect(data.severity).toBe("low");
+		expect(findings(data)[0].detail).toMatch(/does not exist/);
+	});
+
+	it("rescues a no-match citation via a unique declared-files: suffix match and verifies its lines", () => {
+		// The file lives under a skipped tree (coverage/) — invisible to the
+		// suffix walk — but the plan's own files: declares it. dist-file has 4
+		// lines, so a line-20 citation must fail the range check, proving the
+		// rescue resolved to the declared file rather than skipping the citation.
+		mkdirSync(join(tmpDir, "coverage/gen"), { recursive: true });
+		writeFileSync(join(tmpDir, "coverage/gen/report.md"), "a\nb\nc\n");
+		const data = runOn(plan(`${fm('"coverage/gen/report.md"')}Refresh the table (gen/report.md:20).\n`));
+		expect(data.pass).toBe(false);
+		expect(data.severity).toBe("low");
+		expect(findings(data)[0].detail).toMatch(/matches no version of the file/);
+	});
+
+	it("skips a citation to a declared file absent from the tree (forward reference to a planned CREATE)", () => {
+		const data = runOn(plan(`${fm('"src/new-module.ts"')}The new helper lands at new-module.ts:10.\n`));
+		expect(data.pass).toBe(true);
+		expect(data.findings).toEqual([]);
+	});
+
+	it("rates a files: coverage gap `high` (protects the implement fanout's dep derivation)", () => {
+		const data = runOn(plan(`${fm("")}### Changes\n- \`src/foo.ts\` — add the thing\n`));
+		expect(data.pass).toBe(false);
+		expect(data.severity).toBe("high");
+		expect(findings(data)[0].advisory).toBeUndefined();
+	});
+
+	it("rates a clean floor `none` (unchanged green path)", () => {
+		mkdirSync(join(tmpDir, "src"), { recursive: true });
+		writeFileSync(join(tmpDir, "src/ok.ts"), Array.from({ length: 50 }, (_, i) => `l${i}`).join("\n"));
+		const data = runOn(plan(`${fm('"src/ok.ts"')}Retype the constant (src/ok.ts:5).\n`));
+		expect(data.pass).toBe(true);
+		expect(data.severity).toBe("none");
 	});
 });
 
@@ -4300,6 +4620,24 @@ describe("ship workflow (lightweight /wf preset)", () => {
 				expect(SHIP_STAGES.indexOf(target), `${src} → ${target}`).toBeGreaterThan(from);
 			}
 		}
+	});
+
+	// Ship deliberately keeps the pass-only match — the tiered verdicts build
+	// quarantines/adjudicates ("untracked-only"/"excess") are terminal here like
+	// any other red gate (stop-on-fail contract, no quarantine arm).
+	it("ship's scope gate STOPs the tiered non-pass verdicts (no quarantine arm)", () => {
+		const e = findWorkflow("ship").edges["implement-scope-check"];
+		if (typeof e !== "function") throw new Error("ship implement-scope-check edge is not an EdgeFn");
+		const route = (verdict: string) =>
+			String(
+				(e as EdgeFn)({
+					output: undefined,
+					state: { named: { "implement-scope-check": [{ data: { verdict } }] } } as unknown as RunView,
+				}),
+			);
+		expect(route("pass")).toBe("reconcile");
+		expect(route("untracked-only")).toBe("stop");
+		expect(route("excess")).toBe("stop");
 	});
 
 	it('implement reads ["plans"]', () => {
@@ -5190,8 +5528,27 @@ describe("build validate + commit dispatch thread the run-start baseline", () =>
 			input: undefined,
 			state: { named: { plans, goal: [goalWithBaseline] } } as unknown as RunView,
 		});
+		// Exact match doubles as the --scope OMISSION proof: no scope channel in
+		// this state, so no --scope flag may appear.
 		expect(dispatch).toBe(
 			"/skill:validate .rpiv/artifacts/plans/p.md --goal .rpiv/artifacts/goal/goal-t.md --baseline .rpiv/artifacts/goal/baseline-t.json",
+		);
+	});
+
+	it("validate appends --scope with the scope floor's recorded verdict path", async () => {
+		// The demote-and-adjudicate tier rests on this thread: a tracked-excess
+		// verdict reaches validate ONLY via --scope, so the flag must ride the
+		// dispatch whenever the floor has published.
+		const scopeVerdict = out([{ handle: fsHandle(".rpiv/artifacts/verdicts/implement-scope-check__p.json") }]);
+		const dispatch = await promptOf("validate")({
+			cwd: "/repo",
+			input: undefined,
+			state: {
+				named: { plans, goal: [goalWithBaseline], "implement-scope-check": [scopeVerdict] },
+			} as unknown as RunView,
+		});
+		expect(dispatch).toBe(
+			"/skill:validate .rpiv/artifacts/plans/p.md --goal .rpiv/artifacts/goal/goal-t.md --baseline .rpiv/artifacts/goal/baseline-t.json --scope .rpiv/artifacts/verdicts/implement-scope-check__p.json",
 		);
 	});
 
@@ -5325,9 +5682,10 @@ describe("build implement-scope-check (lane-level scope floor)", () => {
 			[],
 		);
 		dirty("packages/a/foo.ts"); // declared
-		dirty("packages/a/stray.ts"); // undeclared → excess
+		dirty("packages/a/stray.ts"); // undeclared, staged (tracked) → excess tier
 		const data = scopeRun()({ cwd: tmpDir, input: undefined, state }).data;
 		expect(data.pass).toBe(false);
+		expect(data.verdict).toBe("excess"); // tracked → demoted-and-adjudicated tier
 		expect(data.severity).toBe("high");
 		expect(String(data.feedback)).toMatch(/packages\/a\/stray\.ts/);
 		expect(String(data.feedback)).toMatch(/Undeclared write/);
@@ -5408,7 +5766,32 @@ describe("build implement-scope-check (lane-level scope floor)", () => {
 		dirtyUntracked("pkgs/skills/x/_helpers/stray.mjs"); // undeclared → excess
 		const data = scopeRun()({ cwd: tmpDir, input: undefined, state }).data;
 		expect(data.pass).toBe(false);
+		// All excess is untracked (`??`) → the deterministically-remediable tier.
+		expect(data.verdict).toBe("untracked-only");
+		expect(data.severity).toBe("medium");
 		expect(String(data.feedback)).toMatch(/pkgs\/skills\/x\/_helpers\/stray\.mjs/);
+	});
+
+	// Regression: run 2026-08-20_18-10-39-17e7. A validate-fix round left two
+	// scratch scripts in an untracked `.tmp/` and the floor's terminal fail killed
+	// a functionally green 5-hour run. The tier now routes that shape to the
+	// quarantine arm instead; ANY tracked excess still escalates the whole verdict
+	// (one stomp taints the tree — quarantining the untracked remainder wouldn't
+	// make it judgeable-clean).
+	it("mixed tracked + untracked excess folds to the tracked tier (excess)", () => {
+		const state = seed(
+			".rpiv/artifacts/plans/p.md",
+			plan(['"packages/a/foo.ts"'], 1),
+			".rpiv/artifacts/goal/baseline-t.json",
+			[],
+		);
+		dirty("packages/a/stray.ts"); // tracked excess
+		dirtyUntracked(".tmp/check-c3r2.mjs"); // untracked excess
+		const data = scopeRun()({ cwd: tmpDir, input: undefined, state }).data;
+		expect(data.verdict).toBe("excess");
+		expect(data.severity).toBe("high");
+		const wheres = (data.findings as { where: string }[]).map((f) => f.where).sort();
+		expect(wheres).toEqual([".tmp/check-c3r2.mjs", "packages/a/stray.ts"]);
 	});
 
 	it("subtracts run-start baseline paths (pre-existing dirt is not the run's fault)", () => {
@@ -5515,6 +5898,202 @@ describe("build implement-scope-check (lane-level scope floor)", () => {
 	});
 });
 
+// ---------------------------------------------------------------------------
+// build scope-quarantine — the deterministic remedy arm for an untracked-only
+// scope verdict: MOVE (never delete) run-created untracked excess under
+// .rpiv/tmp/scope-quarantine/ and publish a manifest, then re-enter the floor.
+// ---------------------------------------------------------------------------
+
+describe("build scope-quarantine (untracked-excess remedy arm)", () => {
+	let tmpDir: string;
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "rpiv-build-quarantine-"));
+		execFileSync("git", ["init"], { cwd: tmpDir, stdio: "ignore" });
+	});
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	const quarantineRun = () => {
+		const stage = findWorkflow("build").stages["scope-quarantine"];
+		if (!stage?.run) throw new Error("build scope-quarantine stage has no run function");
+		return stage.run as unknown as (ctx: { cwd: string; input?: undefined; state: RunView }) => {
+			data: { moved: { from: string; to: string }[]; refused: { path: string; reason: string }[] };
+			artifacts: { handle: { kind: string; path: string } }[];
+		};
+	};
+	const out = (rel: string) => ({ artifacts: [{ handle: fsHandle(rel) }], data: undefined, kind: "", meta: {} });
+	const verdictEntry = (wheres: string[]) => ({
+		artifacts: [],
+		data: { verdict: "untracked-only", findings: wheres.map((where) => ({ detail: "x", where })) },
+		kind: "json",
+		meta: {},
+	});
+	const stateOf = (wheres: string[]) =>
+		({
+			named: {
+				plans: [out(".rpiv/artifacts/plans/p.md")],
+				"implement-scope-check": [verdictEntry(wheres)],
+			},
+		}) as unknown as RunView;
+	const untrackedFile = (rel: string, content = "x\n") => {
+		const parts = rel.split("/");
+		if (parts.length > 1) mkdirSync(join(tmpDir, ...parts.slice(0, -1)), { recursive: true });
+		writeFileSync(join(tmpDir, rel), content);
+	};
+
+	// Mechanical proof of "at most one quarantine hop per gate entry": after the
+	// move, the re-check's untracked-excess set is empty (the quarantined copies
+	// live under the exempt .rpiv/ tree), so the second verdict can never be
+	// "untracked-only" again — the loop converges to pass (or reveals tracked
+	// drift), never ping-pongs.
+	it("check → quarantine → re-check converges: the second verdict is pass, never untracked-only again", () => {
+		const planRel = ".rpiv/artifacts/plans/p.md";
+		mkdirSync(join(tmpDir, ".rpiv/artifacts/plans"), { recursive: true });
+		writeFileSync(
+			join(tmpDir, planRel),
+			`---\nstatus: ready\nphase_count: 1\nphases:\n  - { n: 1, title: P, files: ["packages/a/foo.ts"] }\n---\n## Phase 1: P\n`,
+		);
+		const baselineRel = ".rpiv/artifacts/goal/baseline-t.json";
+		mkdirSync(join(tmpDir, ".rpiv/artifacts/goal"), { recursive: true });
+		writeFileSync(join(tmpDir, baselineRel), JSON.stringify({ paths: [] }, null, 2));
+		untrackedFile(".tmp/scratch.mjs");
+
+		const checkStage = findWorkflow("build").stages["implement-scope-check"];
+		if (!checkStage?.run) throw new Error("build implement-scope-check stage has no run function");
+		const checkRun = checkStage.run as unknown as (ctx: { cwd: string; input?: undefined; state: RunView }) => {
+			data: Record<string, unknown>;
+		};
+		const checkState = {
+			named: {
+				plans: [out(planRel)],
+				goal: [
+					out(".rpiv/artifacts/goal/goal-t.md"),
+					{
+						artifacts: [{ handle: fsHandle(baselineRel), role: "baseline" }],
+						data: undefined,
+						kind: "",
+						meta: {},
+					},
+				],
+			},
+		} as unknown as RunView;
+
+		const first = checkRun({ cwd: tmpDir, input: undefined, state: checkState });
+		expect(first.data.verdict).toBe("untracked-only");
+
+		const quarantineState = {
+			named: {
+				...(checkState as unknown as { named: Record<string, unknown> }).named,
+				"implement-scope-check": [{ artifacts: [], data: first.data, kind: "json", meta: {} }],
+			},
+		} as unknown as RunView;
+		quarantineRun()({ cwd: tmpDir, input: undefined, state: quarantineState });
+
+		const second = checkRun({ cwd: tmpDir, input: undefined, state: checkState });
+		expect(second.data.verdict).toBe("pass");
+		expect(second.data.findings).toEqual([]);
+	});
+
+	it("moves listed untracked files under .rpiv/tmp/scope-quarantine/ and writes the manifest", () => {
+		untrackedFile(".tmp/check-c3r2.mjs", "console.log(1)\n");
+		untrackedFile(".tmp/check-c4r5.mjs", "console.log(2)\n");
+		const result = quarantineRun()({
+			cwd: tmpDir,
+			input: undefined,
+			state: stateOf([".tmp/check-c3r2.mjs", ".tmp/check-c4r5.mjs"]),
+		});
+		// Moved, not deleted: content survives at the quarantine path, source is gone.
+		expect(existsSync(join(tmpDir, ".tmp/check-c3r2.mjs"))).toBe(false);
+		expect(readFileSync(join(tmpDir, ".rpiv/tmp/scope-quarantine/.tmp/check-c3r2.mjs"), "utf-8")).toBe(
+			"console.log(1)\n",
+		);
+		expect(result.data.moved).toEqual([
+			{ from: ".tmp/check-c3r2.mjs", to: join(".rpiv/tmp/scope-quarantine", ".tmp/check-c3r2.mjs") },
+			{ from: ".tmp/check-c4r5.mjs", to: join(".rpiv/tmp/scope-quarantine", ".tmp/check-c4r5.mjs") },
+		]);
+		// Manifest basename-keyed off the plan, beside the scope verdict.
+		const manifest = JSON.parse(
+			readFileSync(join(tmpDir, ".rpiv/artifacts/verdicts/scope-quarantine__p.json"), "utf-8"),
+		);
+		expect(manifest.moved).toHaveLength(2);
+		expect(result.artifacts[0]?.handle.path).toBe(join(".rpiv/artifacts/verdicts", "scope-quarantine__p.json"));
+	});
+
+	it("never touches a listed path that is tracked (or otherwise not untracked) at move time — recorded as refused", () => {
+		untrackedFile("packages/a/kept.ts", "v0\n");
+		execFileSync("git", ["add", "--", "packages/a/kept.ts"], { cwd: tmpDir, stdio: "ignore" });
+		const result = quarantineRun()({ cwd: tmpDir, input: undefined, state: stateOf(["packages/a/kept.ts"]) });
+		expect(result.data.moved).toEqual([]);
+		expect(result.data.refused).toEqual([{ path: "packages/a/kept.ts", reason: "not-untracked-at-move-time" }]);
+		expect(readFileSync(join(tmpDir, "packages/a/kept.ts"), "utf-8")).toBe("v0\n");
+	});
+
+	it("refuses a cwd-escaping finding path (containedPath guard) without throwing — recorded as refused", () => {
+		// Cannot arise from `git status` (which reports repo-relative paths only) —
+		// belt-and-braces against a corrupt verdict JSON on the channel. The
+		// escaping path is refused by the untracked check first; either way it
+		// lands in `refused`, observable without re-running the floor.
+		const result = quarantineRun()({ cwd: tmpDir, input: undefined, state: stateOf(["../escape.txt"]) });
+		expect(result.data.moved).toEqual([]);
+		expect((result.data.refused as { path: string }[]).map((r) => r.path)).toEqual(["../escape.txt"]);
+	});
+
+	it("is idempotent — a re-run finds nothing untracked, and the manifest KEEPS round 1's moves", () => {
+		untrackedFile(".tmp/scratch.mjs");
+		const state = stateOf([".tmp/scratch.mjs"]);
+		quarantineRun()({ cwd: tmpDir, input: undefined, state });
+		const second = quarantineRun()({ cwd: tmpDir, input: undefined, state });
+		expect(second.data.moved).toEqual([]);
+		expect(readFileSync(join(tmpDir, ".rpiv/tmp/scope-quarantine/.tmp/scratch.mjs"), "utf-8")).toBe("x\n");
+		// Merge-on-write: the re-run's empty round must not erase the recorded move.
+		const manifest = JSON.parse(
+			readFileSync(join(tmpDir, ".rpiv/artifacts/verdicts/scope-quarantine__p.json"), "utf-8"),
+		);
+		expect(manifest.moved).toEqual([
+			{ from: ".tmp/scratch.mjs", to: join(".rpiv/tmp/scope-quarantine", ".tmp/scratch.mjs") },
+		]);
+	});
+
+	// The manifest is validate's cross-round adjudication record: a validate-fix
+	// re-entry that quarantines AGAIN (round 2) must not erase round 1's moves —
+	// a round-2 missing-file diagnosis on a round-1-moved file consults this file.
+	it("merges across rounds — a second quarantine keeps the first round's move records", () => {
+		untrackedFile(".tmp/round-one.mjs");
+		quarantineRun()({ cwd: tmpDir, input: undefined, state: stateOf([".tmp/round-one.mjs"]) });
+		untrackedFile(".tmp/round-two.mjs");
+		quarantineRun()({ cwd: tmpDir, input: undefined, state: stateOf([".tmp/round-two.mjs"]) });
+		const manifest = JSON.parse(
+			readFileSync(join(tmpDir, ".rpiv/artifacts/verdicts/scope-quarantine__p.json"), "utf-8"),
+		);
+		expect(manifest.moved).toEqual([
+			{ from: ".tmp/round-one.mjs", to: join(".rpiv/tmp/scope-quarantine", ".tmp/round-one.mjs") },
+			{ from: ".tmp/round-two.mjs", to: join(".rpiv/tmp/scope-quarantine", ".tmp/round-two.mjs") },
+		]);
+	});
+
+	// Failure injection: the second move's destination directory is blocked by a
+	// pre-created FILE, so its mkdirSync throws mid-loop. The throw must
+	// propagate (fail-loud STOP on a real fs error), but the finally-write must
+	// land the FIRST move in the manifest — never moved-but-unrecorded files.
+	it("a mid-loop move failure still records completed moves in the manifest before failing", () => {
+		untrackedFile("a/one.mjs", "one\n");
+		untrackedFile("b/two.mjs", "two\n");
+		mkdirSync(join(tmpDir, ".rpiv/tmp/scope-quarantine"), { recursive: true });
+		writeFileSync(join(tmpDir, ".rpiv/tmp/scope-quarantine/b"), "blocker"); // file where a dir must go
+		expect(() =>
+			quarantineRun()({ cwd: tmpDir, input: undefined, state: stateOf(["a/one.mjs", "b/two.mjs"]) }),
+		).toThrow();
+		// First move completed and is recorded; second stayed in place.
+		expect(readFileSync(join(tmpDir, ".rpiv/tmp/scope-quarantine/a/one.mjs"), "utf-8")).toBe("one\n");
+		expect(readFileSync(join(tmpDir, "b/two.mjs"), "utf-8")).toBe("two\n");
+		const manifest = JSON.parse(
+			readFileSync(join(tmpDir, ".rpiv/artifacts/verdicts/scope-quarantine__p.json"), "utf-8"),
+		);
+		expect(manifest.moved).toEqual([{ from: "a/one.mjs", to: join(".rpiv/tmp/scope-quarantine", "a/one.mjs") }]);
+	});
+});
+
 describe("build edges — implement-scope-check sits between implement and validate", () => {
 	const edge = (stage: string): EdgeFn => {
 		const e = findWorkflow("build").edges[stage];
@@ -5533,26 +6112,42 @@ describe("build edges — implement-scope-check sits between implement and valid
 		expect(findWorkflow("build").edges.implement).toBe("implement-scope-check");
 	});
 
-	it("build routes implement-scope-check → reconcile on pass, STOP otherwise (no fallback)", () => {
-		// The `from` form suppresses the READS_DATA lint; a pass verdict now routes to
-		// `reconcile` (the coherence backstop), a fail/missing verdict → stop (no
-		// fallback). Sourced from the scope-check's published verdict channel (the
-		// stage key for an outcome-less produces.script, per resolvePublishName).
+	it("build routes the tiered scope verdict: pass/excess → reconcile, untracked-only → quarantine, else STOP", () => {
+		// The tiered scopeFloorGate (readsData: false — no outputSchema demanded):
+		// "pass" AND tracked "excess" continue to reconcile (excess is demoted to
+		// validate's adjudication via --scope, the citation-floor precedent);
+		// "untracked-only" takes the deterministic quarantine arm; anything else —
+		// a missing/corrupt/legacy verdict — is the terminal integrity stop.
 		expect(route("implement-scope-check", { "implement-scope-check": [{ data: { verdict: "pass" } }] })).toBe(
 			"reconcile",
 		);
+		expect(route("implement-scope-check", { "implement-scope-check": [{ data: { verdict: "excess" } }] })).toBe(
+			"reconcile",
+		);
+		expect(
+			route("implement-scope-check", { "implement-scope-check": [{ data: { verdict: "untracked-only" } }] }),
+		).toBe("scope-quarantine");
+		// Legacy "fail" (a pre-tiering verdict replayed on resume) and a missing
+		// verdict both hit the integrity stop.
 		expect(route("implement-scope-check", { "implement-scope-check": [{ data: { verdict: "fail" } }] })).toBe("stop");
+		expect(route("implement-scope-check", {})).toBe("stop");
 	});
 
-	it("build's stage order lists implement → implement-scope-check → reconcile → validate", () => {
+	it("build routes scope-quarantine → implement-scope-check (deterministic re-entry hop)", () => {
+		expect(findWorkflow("build").edges["scope-quarantine"]).toBe("implement-scope-check");
+	});
+
+	it("build's stage order lists implement → implement-scope-check → scope-quarantine → reconcile → validate", () => {
 		const keys = Object.keys(findWorkflow("build").stages);
 		const i = keys.indexOf("implement");
 		const s = keys.indexOf("implement-scope-check");
+		const q = keys.indexOf("scope-quarantine");
 		const r = keys.indexOf("reconcile");
 		const v = keys.indexOf("validate");
 		expect(i).toBeGreaterThanOrEqual(0);
 		expect(s).toBe(i + 1);
-		expect(r).toBe(s + 1);
+		expect(q).toBe(s + 1);
+		expect(r).toBe(q + 1);
 		expect(v).toBe(r + 1);
 	});
 
@@ -5708,6 +6303,53 @@ describe("reconcile lane stage", () => {
 		expect(details(data)).toMatch(/not a test-expectation file/);
 		// untouched
 		expect(readFileSync(join(tmpDir, "packages/a/a.ts"), "utf-8")).toBe("export const r = 3;\n");
+	});
+
+	it("containment — an ABSOLUTE *.test.ts target outside the tree is flagged and NOT written", () => {
+		// The suffix allowlist alone cannot confine the write: an absolute target
+		// ending .test.ts passes it while bypassing cwd entirely. FAILS without the
+		// resolve-then-contain guard.
+		const outside = mkdtempSync(join(tmpdir(), "rpiv-reconcile-outside-"));
+		try {
+			const target = join(outside, "escape.test.ts");
+			writeFileSync(target, "expect(r).toBe(3);\n");
+			const plan = write(
+				".rpiv/artifacts/plans/p.md",
+				planBody({
+					directives: [`- \`${target}\`: replace \`expect(r).toBe(3)\` → \`expect(r).toBe(4)\` — escape`],
+				}),
+			);
+			const data = runOn(plan);
+			expect(data.pass).toBe(false);
+			expect(details(data)).toMatch(/outside the working tree/);
+			// untouched — the guarded sink never resolved the escape
+			expect(readFileSync(target, "utf-8")).toBe("expect(r).toBe(3);\n");
+		} finally {
+			rmSync(outside, { recursive: true, force: true });
+		}
+	});
+
+	it("containment — a `..`-escaping *.test.ts target is flagged and NOT written", () => {
+		// A relative target that traverses out of cwd satisfies the suffix test on the
+		// raw string; containment is checked on the RESOLVED path. FAILS without the guard.
+		const outside = mkdtempSync(join(tmpdir(), "rpiv-reconcile-outside-"));
+		try {
+			const target = join(outside, "escape.test.ts");
+			writeFileSync(target, "expect(r).toBe(3);\n");
+			const traversal = `../${basename(outside)}/escape.test.ts`; // resolves to a tmpDir SIBLING
+			const plan = write(
+				".rpiv/artifacts/plans/p.md",
+				planBody({
+					directives: [`- \`${traversal}\`: replace \`expect(r).toBe(3)\` → \`expect(r).toBe(4)\` — escape`],
+				}),
+			);
+			const data = runOn(plan);
+			expect(data.pass).toBe(false);
+			expect(details(data)).toMatch(/outside the working tree/);
+			expect(readFileSync(target, "utf-8")).toBe("expect(r).toBe(3);\n");
+		} finally {
+			rmSync(outside, { recursive: true, force: true });
+		}
 	});
 
 	it("treats an already-applied directive as satisfied on re-run (idempotent)", () => {

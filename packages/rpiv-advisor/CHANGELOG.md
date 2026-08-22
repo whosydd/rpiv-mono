@@ -7,6 +7,16 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-08-21
+
+## [2.6.4] - 2026-08-20
+
+## [2.6.3] - 2026-08-20
+
+### Fixed
+
+- The published npm tarball no longer includes the co-located `advisor/pi-compat.test.ts` — the `files` array now carries the same `!**/*.test.ts` negation as every sibling package.
+
 ## [2.6.2] - 2026-08-18
 
 ## [2.6.1] - 2026-08-17

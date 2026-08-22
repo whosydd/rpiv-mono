@@ -7,6 +7,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-08-21
+
+### Added
+
+- Press `n` on the Submit tab to attach a global note to the whole questionnaire (#182). The note reaches the model as a trailing `global note: <text>` envelope segment and as `details.globalNote`, survives tab switches, and never marks a question answered; the Submit tab advertises it in the bottom key-hint row (below the picker, matching the question tabs' hint idiom) and shows the committed note as a `Note` entry in the review list.
+- A global note counts as an answer: submitting with every question blank but a non-empty global note returns the answered envelope instead of the decline. A cancelled result keeps its note in `details.globalNote` while the `content` text stays the canonical decline message.
+- Notes — per-question `n` and the Submit-tab global note — are documented as terminal-only: the native `select`/`input` dialogs of RPC/ACP hosts carry no note field.
+
+## [2.6.4] - 2026-08-20
+
+## [2.6.3] - 2026-08-20
+
+### Fixed
+
+- The dialog footer hint now names the configured `collapseKey` (e.g. `Alt+O to collapse`) instead of always reading `Ctrl+]`, and is omitted entirely when `collapseKey` is `"off"` — previously the dialog advertised a shortcut that could not fire (#176).
+- The collapsed one-line footer (`… to expand`) and the one-shot hide notification use the same display casing as the footer hint (`Ctrl+]`, `Alt+O`), instead of the raw lowercase config spec.
+- Compound named keys display conventionally in hints (`Ctrl+PageDown`, not `Ctrl+Pagedown`).
+- Collapsing no longer hides the overlay on hosts that expose an overlay handle but no raw terminal input — hiding would be irreversible there (pi-tui routes no input to a hidden overlay), so the dialog now falls back to the visible one-line collapsed row, which the same key expands.
+
 ## [2.6.2] - 2026-08-18
 
 ## [2.6.1] - 2026-08-17

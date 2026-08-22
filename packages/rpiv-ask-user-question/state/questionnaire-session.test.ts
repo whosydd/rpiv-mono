@@ -85,6 +85,7 @@ function makeSession(options: SessionTestOptions = {}) {
 		keybindings: options.keybindings ?? keybindings,
 		editInput: options.editInput ?? (async () => undefined),
 		collapseKey: "off",
+		canReopenWhileHidden: false,
 	});
 	return { session, done };
 }
@@ -294,5 +295,20 @@ describe("QuestionnaireSession — custom-answer drafts", () => {
 
 		session.dispatch(TAB);
 		expect(session.component.render(120).join("\n")).toContain("second");
+	});
+});
+
+describe("QuestionnaireSession — collapsed row with collapseKey 'off'", () => {
+	it("renders the cancel-only line, never a literal 'Off to expand' (#176)", () => {
+		// The router and raw listener never collapse when off, but
+		// toggleCollapsedExternal() is a public ungated entry — the collapsed row
+		// must not advertise a disabled shortcut if a caller forces it.
+		const { session } = makeSession();
+		session.toggleCollapsedExternal();
+		const collapsed = session.component.render(120);
+		expect(collapsed).toHaveLength(1);
+		expect(collapsed[0]).toContain("Esc to cancel");
+		expect(collapsed[0]).not.toContain("to expand");
+		expect(collapsed[0]).not.toContain("Off");
 	});
 });

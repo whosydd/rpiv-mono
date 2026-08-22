@@ -58,7 +58,7 @@ locales/                — JSON translation maps loaded via i18n-bridge at modu
 
 ## Collapse Mode
 
-The shortcut is configurable via the `collapseKey` config field (default `ctrl+]`; `"off"` disables; malformed specs fall back to the default). It dispatches `toggle_collapsed` (intercepted at the top of `routeKey`, works from every inner state) → flips `state.collapsed` and emits a `set_overlay_hidden` effect, which the session routes to `OverlayHandle.setHidden` — the overlay is fully hidden (chat scrolling and editor focus resume; Esc does not cancel while hidden). Because pi-tui delivers no input to a hidden overlay, `execute()` registers a raw terminal listener for the same key to re-expand — it defers when another overlay is focused. Source: `state/state.ts:35`, `state/key-router.ts:35-36,178-192`, `state/state-reducer.ts:292-295`, `state/questionnaire-session.ts:179-183`, `ask-user-question.ts:231-252`.
+The shortcut is configurable via the `collapseKey` config field (default `ctrl+]`; `"off"` disables; malformed specs fall back to the default). It dispatches `toggle_collapsed` (intercepted at the top of `routeKey`, works from every inner state) → flips `state.collapsed` and emits a `set_overlay_hidden` effect, which the session routes to `OverlayHandle.setHidden` — the overlay is fully hidden (chat scrolling and editor focus resume; Esc does not cancel while hidden). Because pi-tui delivers no input to a hidden overlay, `execute()` registers a raw terminal listener for the same key to re-expand — it defers when another overlay is focused. The session honours `set_overlay_hidden` only when that listener was registered (`canReopenWhileHidden`); on hosts without raw terminal input, collapse instead shrinks the overlay to a visible one-line row that keeps focus and input routing. Source: `state/state.ts:43`, `state/key-router.ts:35-36,172-186`, `state/state-reducer.ts:292-295`, `state/questionnaire-session.ts:199-206`, `ask-user-question.ts:237-265`.
 
 ## Execution Modes & Load Resilience
 
@@ -71,8 +71,8 @@ The shortcut is configurable via the `collapseKey` config field (default `ctrl+]
 - **NO subclassing or per-kind boolean flags for special rows** — `kind` discriminator + `ROW_INTENT_META` are the single mechanism (enforced by a banned-flags test)
 - **NO live-component reads from the reducer** — dispatch-time component values arrive in action payloads; `ApplyContext` contains session-lifetime constants only
 - **Tool-result envelope** always built via the result-envelope helper; the questionnaire error type unifies validator and runtime
-- **Side-band drafts** — `notesByTab` and `customDraftsByTab` live separately from `answers`; confirming custom text removes its draft so the answer becomes authoritative
-- **Partial-submit allowed** — Submit always submits; the warning header is the sole signal of incompleteness
+- **Side-band drafts** — `notesByTab` and `customDraftsByTab` live separately from `answers`; confirming custom text removes its draft so the answer becomes authoritative. The Submit tab's global note rides the same side-band at the pseudo-index `notesByTab[questions.length]`; `doneFor` lifts it into `QuestionnaireResult.globalNote` via conditional spread (attach-on-cancel — no `!cancelled` guard)
+- **Partial-submit allowed** — Submit always submits; the warning header is the sole signal of incompleteness — a non-empty global note alone returns an answered result (envelope `global note:` segment) rather than the decline
 - **State-shape unity** — `QuestionnaireState` is the single canonical shape; runtime context is held separately and never reaches view setProps consumers
 - **Effects as a closed union** — adding an effect requires updating both the `Effect` union AND the runtime's switch (compiler-enforced)
 - **Discriminated focus** — `selectActiveView` returns one of `"notes" | "options" | "submit"` from canonical state; replaces parallel boolean focus flags

@@ -10,7 +10,7 @@ import type { QuestionAnswer, QuestionData } from "../tool/types.js";
 import type { MultiSelectView } from "./components/multi-select-view.js";
 import type { OptionListView } from "./components/option-list-view.js";
 import type { PreviewPane } from "./components/preview/preview-pane.js";
-import { SubmitPicker } from "./components/submit-picker.js";
+import { SUBMIT_LABEL, SubmitPicker } from "./components/submit-picker.js";
 import type { TabBar } from "./components/tab-bar.js";
 import {
 	type DialogConfig,
@@ -20,8 +20,10 @@ import {
 	HINT_MULTI,
 	HINT_PART_CANCEL,
 	HINT_PART_ENTER,
+	HINT_PART_NEW_LINE,
 	HINT_PART_NOTES,
 	HINT_SINGLE,
+	READY_PROMPT,
 	REVIEW_HEADING,
 } from "./dialog-builder.js";
 import type { TabComponents } from "./tab-components.js";
@@ -120,6 +122,7 @@ function makeConfig(over: MakeConfigOverrides = {}): DialogParts {
 		getBodyHeight: over.getBodyHeight ?? (() => 1),
 		getCurrentBodyHeight: over.getCurrentBodyHeight ?? (() => 1),
 		getTerminalRows: over.getTerminalRows ?? (() => 24),
+		collapseKey: over.collapseKey ?? "ctrl+]",
 	};
 	const initialProps: DialogProps = over.initialProps ?? { state, activePreviewPane: previewPane };
 	return { config, initialProps };
@@ -478,5 +481,121 @@ describe("Dialog overflow — notes open on a multi-select tab (NFR-2)", () => {
 		expect(lines[0]).toMatch(/─/);
 		expect(lines.join("\n")).toContain(HINT_PART_CANCEL);
 		expect(lines.join("\n")).not.toContain(HINT_MULTI);
+	});
+});
+
+describe("Dialog overflow — notes open on the Submit tab (NFR-2)", () => {
+	const answers = new Map<number, QuestionAnswer>([
+		[0, { questionIndex: 0, question: "Q1?", kind: "option", answer: "A" }],
+		[1, { questionIndex: 1, question: "Q2?", kind: "option", answer: "X" }],
+	]);
+
+	function submitState(over: Partial<DialogState> = {}): DialogState {
+		return {
+			currentTab: 2,
+			optionIndex: 0,
+			notesVisible: false,
+			inputMode: false,
+			answers,
+			multiSelectChecked: new Set(),
+			customDraftsByTab: new Map(),
+			notesByTab: new Map(),
+			submitChoiceIndex: 0,
+			notesDraft: "",
+			collapsed: false,
+			...over,
+		};
+	}
+
+	function makeSubmitDialog(state: DialogState, over: MakeConfigOverrides = {}): DialogView {
+		const picker = new SubmitPicker(theme);
+		picker.setProps(submitPickerPropsFromState(state, true));
+		return makeDialog(
+			makeConfig({
+				state,
+				submitPicker: picker,
+				getTerminalRows: () => 50,
+				getBodyHeight: () => 8,
+				...over,
+			}),
+		);
+	}
+
+	it("flipping notesVisible false→true grows the render by exactly 3; tail identical; hint blanks while open", () => {
+		const closedLines = makeSubmitDialog(submitState()).render(80);
+		const openLines = makeSubmitDialog(submitState({ notesVisible: true })).render(80);
+		// midRows = Global-note header + notesInput (stubbed to 1 row) + Spacer = 3 rows.
+		expect(openLines.length - closedLines.length).toBe(3);
+		expect(openLines.join("\n")).toContain("Global note:");
+		expect(openLines.join("\n")).toContain("<NOTES_INPUT>");
+		expect(closedLines.join("\n")).not.toContain("<NOTES_INPUT>");
+		// The bottom hint row is always present: the note part shows while closed and
+		// gives way to the Shift+Enter newline hint while the editor is open.
+		expect(closedLines.join("\n")).toContain("n to add a note");
+		expect(openLines.join("\n")).not.toContain("n to add a note");
+		expect(openLines.join("\n")).toContain(HINT_PART_NEW_LINE);
+		// NFR-2: growing midRows never desyncs the residual-spacer math — the trailing
+		// blank tail is identical with the editor closed vs open (footer stays 5 rows).
+		const trailingBlanks = (lines: string[]) => {
+			let n = 0;
+			for (let i = lines.length - 1; i >= 0 && lines[i].trim() === ""; i--) n++;
+			return n;
+		};
+		expect(trailingBlanks(openLines)).toBe(trailingBlanks(closedLines));
+	});
+
+	it("overflow while open: output ≤ termRows, sticky top border, sticky footer (picker visible)", () => {
+		const dlg = makeSubmitDialog(submitState({ notesVisible: true }), {
+			getTerminalRows: () => 12,
+			getBodyHeight: () => 20,
+		});
+		const lines = dlg.render(80);
+		expect(lines.length).toBeLessThanOrEqual(12);
+		expect(lines[0]).toMatch(/─/);
+		expect(lines.join("\n")).toContain(SUBMIT_LABEL);
+	});
+
+	it("width-clip: render length is width-invariant in the one-line regime; hint clips to one row, never wraps", () => {
+		// READY_PROMPT (30 visible cols) is the widest footer string, so the length sweep
+		// starts where every footer row is single-line. A wrapping hint would inflate the
+		// submit footer past footerRowCount=5 and desync the cross-tab height equalizer.
+		const widths = [40, 60, 80, 120];
+		const lengths = new Set(widths.map((w) => makeSubmitDialog(submitState()).render(w).length));
+		expect(lengths.size).toBe(1);
+		// Ultra-narrow: exactly one hint row survives, clipped (never wrapped to two).
+		// The bottom hint opens with HINT_PART_ENTER, so its prefix is the row's signature.
+		const narrow = makeSubmitDialog(submitState()).render(10);
+		const hintRows = narrow.filter((l) => stripAnsi(l).startsWith("Enter to"));
+		expect(hintRows.length).toBe(1);
+		expect(visibleWidth(hintRows[0]!)).toBeLessThanOrEqual(10);
+	});
+
+	it("hint sits BELOW the picker; the prompt reads straight into its options", () => {
+		// The #182 review moved the note affordance out of the prompt→picker gap: the
+		// footer order is prompt, picker rows, then the bottom key-hint row (the same
+		// bottom-row idiom as question tabs).
+		const lines = makeSubmitDialog(submitState()).render(80).map(stripAnsi);
+		const promptRow = lines.findIndex((l) => l.includes(READY_PROMPT));
+		const submitRow = lines.findIndex((l) => l.includes(SUBMIT_LABEL));
+		const hintRow = lines.findIndex((l) => l.includes("n to add a note"));
+		expect(promptRow).toBeGreaterThanOrEqual(0);
+		expect(submitRow).toBe(promptRow + 1);
+		expect(hintRow).toBeGreaterThan(submitRow);
+	});
+
+	it("a committed global note renders as a review entry while closed and hides while the editor is open", () => {
+		// The committed note lives at the questions.length pseudo-index (2 questions here).
+		const noted = () => new Map([[2, "Ship behind a feature flag"]]);
+		const closed = makeSubmitDialog(submitState({ notesByTab: noted() }))
+			.render(80)
+			.join("\n");
+		expect(closed).toContain("● Note");
+		expect(closed).toContain("Ship behind a feature flag");
+		// While the editor is open it is the live surface (seeded with this text) — the
+		// review entry hides so the note never appears twice.
+		const open = makeSubmitDialog(submitState({ notesByTab: noted(), notesVisible: true }))
+			.render(80)
+			.join("\n");
+		expect(open).not.toContain("● Note");
 	});
 });

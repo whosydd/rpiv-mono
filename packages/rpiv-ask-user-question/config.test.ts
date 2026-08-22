@@ -5,9 +5,33 @@ import {
 	type AskUserQuestionConfig,
 	COLLAPSE_KEY_OFF,
 	DEFAULT_COLLAPSE_KEY,
+	formatKeySpecForDisplay,
 	loadConfig,
 	resolveCollapseKey,
 } from "./config.js";
+
+describe("formatKeySpecForDisplay", () => {
+	it("capitalizes each +-part of a resolved spec", () => {
+		expect(formatKeySpecForDisplay("ctrl+]")).toBe("Ctrl+]");
+		expect(formatKeySpecForDisplay("alt+o")).toBe("Alt+O");
+		expect(formatKeySpecForDisplay("ctrl+shift+h")).toBe("Ctrl+Shift+H");
+	});
+
+	it("handles named special keys and bare keys", () => {
+		expect(formatKeySpecForDisplay("f9")).toBe("F9");
+		expect(formatKeySpecForDisplay("alt+escape")).toBe("Alt+Escape");
+		expect(formatKeySpecForDisplay("]")).toBe("]");
+	});
+
+	it("cases compound-word named keys conventionally", () => {
+		expect(formatKeySpecForDisplay("ctrl+pagedown")).toBe("Ctrl+PageDown");
+		expect(formatKeySpecForDisplay("pageup")).toBe("PageUp");
+	});
+
+	it("round-trips the default key to the historical hint casing", () => {
+		expect(formatKeySpecForDisplay(DEFAULT_COLLAPSE_KEY)).toBe("Ctrl+]");
+	});
+});
 
 describe("resolveCollapseKey", () => {
 	it("returns the default when config has no collapseKey", () => {
