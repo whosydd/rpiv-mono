@@ -24,6 +24,7 @@ const BYTE_SHIFT_TAB = "\x1b[Z";
 const BYTE_RIGHT = "\x1b[C";
 const BYTE_LEFT = "\x1b[D";
 const BYTE_SPACE = " ";
+const BYTE_TWO = "2";
 
 function makeQuestion(over: Partial<QuestionData> = {}): QuestionData {
 	return {
@@ -184,6 +185,47 @@ describe("routeKey — tab_switch", () => {
 });
 
 describe("routeKey — confirm (single-select)", () => {
+	it("a number key focuses its matching author-defined option", () => {
+		expect(routeKey(BYTE_TWO, makeState({ optionIndex: 0 }), makeRuntime())).toEqual({
+			kind: "nav",
+			nextIndex: 1,
+			inputValue: "",
+		});
+	});
+
+	it("a number key focuses the numbered custom-input row", () => {
+		const items: WrappingSelectItem[] = [
+			{ kind: "option", label: "A" },
+			{ kind: "option", label: "B" },
+			{ kind: "option", label: "C" },
+			{ kind: "other", label: "Type something." },
+		];
+		expect(routeKey("4", makeState(), makeRuntime({ items, currentItem: items[0] }))).toEqual({
+			kind: "nav",
+			nextIndex: 3,
+			inputValue: "",
+		});
+	});
+
+	it("an unavailable number key is ignored", () => {
+		expect(routeKey("5", makeState(), makeRuntime())).toEqual({ kind: "ignore" });
+	});
+
+	it("Space confirms the focused option", () => {
+		const action = routeKey(
+			BYTE_SPACE,
+			makeState({ optionIndex: 1 }),
+			makeRuntime({
+				currentItem: { kind: "option", label: "B" },
+			}),
+		);
+		expect(action).toMatchObject({
+			kind: "confirm",
+			answer: { questionIndex: 0, answer: "B", kind: "option" },
+			autoAdvanceTab: 1,
+		});
+	});
+
 	it("emits confirm with autoAdvanceTab pointing to the next tab", () => {
 		const action = routeKey(sentinel(KEY.CONFIRM), makeState({ currentTab: 0 }), makeRuntime());
 		expect(action).toMatchObject({
@@ -402,8 +444,11 @@ describe("routeKey — multiSelect", () => {
 		if (action.kind === "multi_confirm") expect(action.autoAdvanceTab).toBe(2);
 	});
 
-	it("Space does NOT emit toggle on a single-select question", () => {
-		expect(routeKey(BYTE_SPACE, makeState(), makeRuntime())).toEqual({ kind: "ignore" });
+	it("Space confirms instead of toggling on a single-select question", () => {
+		expect(routeKey(BYTE_SPACE, makeState(), makeRuntime())).toMatchObject({
+			kind: "confirm",
+			answer: { kind: "option", answer: "A" },
+		});
 	});
 });
 
@@ -496,6 +541,19 @@ describe("routeKey — multiSelect free-text ('Type something.')", () => {
 });
 
 describe("routeKey — cancel + submit", () => {
+	it("1 and 2 focus Submit and Cancel on the Submit tab", () => {
+		const runtime = makeRuntime();
+		const submitTab = runtime.questions.length;
+		expect(routeKey("1", makeState({ currentTab: submitTab, submitChoiceIndex: 1 }), runtime)).toEqual({
+			kind: "submit_nav",
+			nextIndex: 0,
+		});
+		expect(routeKey("2", makeState({ currentTab: submitTab, submitChoiceIndex: 0 }), runtime)).toEqual({
+			kind: "submit_nav",
+			nextIndex: 1,
+		});
+	});
+
 	it("Esc cancels the entire questionnaire from any tab", () => {
 		expect(routeKey(sentinel(KEY.CANCEL), makeState(), makeRuntime())).toEqual({ kind: "cancel" });
 		expect(routeKey(sentinel(KEY.CANCEL), makeState({ currentTab: 2 }), makeRuntime())).toEqual({

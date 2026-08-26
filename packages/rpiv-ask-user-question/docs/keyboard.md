@@ -8,7 +8,8 @@ adapts to the size of your terminal.
 | Key | What it does | Where it applies |
 | --- | --- | --- |
 | `↑` / `↓` | Move between rows. Wraps at both ends. | Option list, Submit picker |
-| `Enter` | Confirm the focused option, commit typed text, close notes, or activate the focused Submit-picker row. | Everywhere |
+| `1`–`9` | Focus the matching numbered option, including `Type something.`. | Option lists (up to nine numbered rows) |
+| `Enter` / `Space` | Confirm the focused single-select option or activate the focused Submit-picker row. | Single-select options and Submit picker |
 | `Shift+Enter` | Insert a newline. | `Type something.` input, notes editor |
 | `Esc` | Cancel the whole questionnaire. | Everywhere except the notes editor, where it closes notes |
 | `Tab` / `Shift+Tab` | Next / previous tab, wrapping. `→` / `←` do the same. | Multi-question dialogs only |
@@ -17,6 +18,11 @@ adapts to the size of your terminal.
 | `Ctrl+G` | Open Pi's configured external editor with the current custom-answer draft. | `Type something.` input |
 | `Ctrl+U` | Clear the current custom-answer draft. | `Type something.` input |
 | `Ctrl+]` | Collapse or expand the dialog. Configurable via `collapseKey`. | Everywhere, including while collapsed |
+
+Pressing `1`–`9` moves focus directly to the matching numbered option, including the
+numbered `Type something.` row; it does not commit or toggle it. The generated `Next` row
+has no number and remains excluded. On a multi-question dialog's Submit tab, `1` focuses
+Submit and `2` focuses Cancel; press `Enter` or `Space` to activate the focused action.
 
 The table names the default keys; the dialog actually follows your Pi keybindings.
 Confirm listens to both `tui.select.confirm` and `tui.input.submit`, and a key bound to
@@ -28,7 +34,7 @@ everywhere `Enter` does.
 In a multi-select question, `Enter` on a regular row toggles its checkbox exactly like
 `Space` — it does not submit. Committing the question means focusing the `Next` row and
 pressing `Enter`. That is deliberate: it makes `Enter` a zero-cost way to flip boxes
-without leaving the home row.
+without leaving the home row. `Space` remains a toggle only for multi-select options.
 
 `Space` is suppressed on two rows: `Next` (it is a command, not a choice) and
 `Type something.` (it is an inline text input, so the space character belongs to your

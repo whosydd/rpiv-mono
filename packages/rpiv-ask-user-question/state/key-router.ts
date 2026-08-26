@@ -50,6 +50,13 @@ function isConfirm(kb: QuestionnaireKeybindings, data: string): boolean {
 	return kb.matches(data, KEYBIND_CONFIRM) || kb.matches(data, KEYBIND_SUBMIT);
 }
 
+// Space also confirms, but only in the single-select confirm and Submit-picker paths:
+// in the notes editor and the inline `Type something.` input it must type a literal
+// space character instead.
+function isConfirmKey(data: string, kb: QuestionnaireKeybindings): boolean {
+	return data === SPACE_KEY || isConfirm(kb, data);
+}
+
 export function wrapTab(index: number, total: number): number {
 	if (total <= 0) return 0;
 	return ((index % total) + total) % total;
@@ -150,6 +157,28 @@ function prevNavOnUp(state: QuestionnaireState, runtime: QuestionnaireRuntime): 
 	};
 }
 
+/** Maps a bare 1–9 keystroke to a visibly numbered option row, including custom input. */
+function optionShortcutAction(
+	data: string,
+	q: QuestionnaireRuntime["questions"][number],
+	runtime: QuestionnaireRuntime,
+): QuestionnaireAction | null {
+	if (!/^[1-9]$/.test(data)) return null;
+	const index = Number(data) - 1;
+	// Every question numbers author options plus the generated custom-input row; the
+	// multi-select Next row deliberately has no number and must remain excluded.
+	if (index > q.options.length) return null;
+	const item = runtime.items[index];
+	if (item?.kind !== "option" && item?.kind !== "other") return null;
+	return { kind: "nav", nextIndex: index, inputValue: runtime.inputBuffer };
+}
+
+function submitShortcutAction(data: string): QuestionnaireAction | null {
+	if (data === "1") return { kind: "submit_nav", nextIndex: 0 };
+	if (data === "2") return { kind: "submit_nav", nextIndex: 1 };
+	return null;
+}
+
 // Collapsed-mode lockout: while collapsed, swallow every keystroke except cancel so
 // the user can read the now-uncovered transcript without accidentally mutating
 // answers or notes. The collapse toggle itself is already handled above.
@@ -198,6 +227,8 @@ function routeSubmitTab(
 	runtime: QuestionnaireRuntime,
 ): QuestionnaireAction {
 	if (kb.matches(data, KEYBIND_CANCEL)) return { kind: "cancel" };
+	const shortcut = submitShortcutAction(data);
+	if (shortcut) return shortcut;
 	const tab = tabSwitchAction(data, state, runtime);
 	if (tab) return tab;
 	if (kb.matches(data, KEYBIND_UP) || kb.matches(data, KEYBIND_DOWN)) {
@@ -205,7 +236,7 @@ function routeSubmitTab(
 		const next = wrapTab(state.submitChoiceIndex + delta, 2);
 		return { kind: "submit_nav", nextIndex: (next === 1 ? 1 : 0) as 0 | 1 };
 	}
-	if (isConfirm(kb, data)) {
+	if (isConfirmKey(data, kb)) {
 		// D1 (revised): Submit always submits; Cancel always cancels. The warning header
 		// is informational only — `allAnswered(state)` no longer gates submission. Partial
 		// answers flow through `orderedAnswers()` in the host.
@@ -270,7 +301,7 @@ function routeSingleSelectTab(
 	state: QuestionnaireState,
 	runtime: QuestionnaireRuntime,
 ): QuestionnaireAction {
-	if (isConfirm(kb, data)) {
+	if (isConfirmKey(data, kb)) {
 		const answer = buildSingleSelectAnswer(state, runtime);
 		if (!answer) return { kind: "ignore" };
 		return { kind: "confirm", answer, autoAdvanceTab: computeAutoAdvanceTab(state, runtime) };
@@ -340,6 +371,9 @@ export function routeKey(data: string, state: QuestionnaireState, runtime: Quest
 	if (data === NOTES_ACTIVATE_KEY) {
 		return { kind: "notes_enter" };
 	}
+
+	const shortcut = optionShortcutAction(data, q, runtime);
+	if (shortcut) return shortcut;
 
 	if (kb.matches(data, KEYBIND_UP)) {
 		return prevNavOnUp(state, runtime);
