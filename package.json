@@ -27,7 +27,7 @@
 		"release:patch": "node scripts/release.mjs patch",
 		"release:minor": "node scripts/release.mjs minor",
 		"release:major": "node scripts/release.mjs major",
-		"prepare": "husky"
+		"prepare": "if [ -x node_modules/.bin/husky ]; then husky; fi"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.5",
