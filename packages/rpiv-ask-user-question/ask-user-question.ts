@@ -57,9 +57,20 @@ function emitAskUserPromptEvent(pi: ExtensionAPI, params: QuestionParams): void 
 	pi.events.emit(ASK_USER_PROMPT_EVENT, payload);
 }
 
-function emitAskUserBlockedEvent(pi: ExtensionAPI, active: boolean): void {
+/**
+ * Herdr's blocked-state convention (see the herdr-managed `herdr-agent-state.ts`).
+ * Emitting it here lets the Herdr agents panel show "blocked" while the
+ * questionnaire awaits input, without a separate user-owned bridge extension.
+ */
+const HERDR_BLOCKED_EVENT = "herdr:blocked";
+
+function emitAskUserBlockedEvent(pi: ExtensionAPI, active: boolean, label?: string): void {
 	const payload: AskUserBlockedEventPayload = { active };
 	pi.events.emit(ASK_USER_BLOCKED_EVENT, payload);
+	pi.events.emit(HERDR_BLOCKED_EVENT, {
+		active,
+		...(active ? { label: label ?? "question" } : {}),
+	});
 }
 
 /** Non-interactive host backstop (the reconciler normally strips the tool first). */
@@ -69,7 +80,7 @@ function rejectWithoutUi() {
 
 /** Sequential native-dialog walker for RPC hosts; brackets it with the blocked-event pair + terminal bell. */
 async function runRpcPath(pi: ExtensionAPI, ui: DialogUI, typed: QuestionParams) {
-	emitAskUserBlockedEvent(pi, true);
+	emitAskUserBlockedEvent(pi, true, typed.questions[0]?.question);
 	try {
 		emitTerminalAttention();
 		return buildQuestionnaireResponse(await runRpcQuestionnaire(ui, typed), typed);
@@ -433,7 +444,7 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 			const mount = (p: Presentation) =>
 				mountQuestionnaire({ ctx, typed, itemsByTab, collapseKey, presentation: p, Session: QuestionnaireSession });
 
-			emitAskUserBlockedEvent(pi, true);
+			emitAskUserBlockedEvent(pi, true, typed.questions[0]?.question);
 			try {
 				emitTerminalAttention();
 				let result = await mount(presentation);
