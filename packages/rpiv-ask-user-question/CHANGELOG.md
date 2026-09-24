@@ -5,6 +5,12 @@ All notable changes to `@juicesharp/rpiv-ask-user-question` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Emit `herdr:blocked` beside the package-owned `rpiv:ask-user:blocked` contract while the questionnaire awaits input (TUI `ui.custom` and RPC dialog walker), labeled with the first question's text and cleared in `finally` on answer, cancel, or error — so the Herdr agents panel shows `blocked` without a separate user-owned bridge extension. The `rpiv:ask-user:blocked` payload and channels are unchanged.
+
 ## [2.11.0] - 2026-09-21
 
 ## [2.10.1] - 2026-09-13
