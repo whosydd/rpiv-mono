@@ -4,6 +4,7 @@ import { createMockPi } from "@juicesharp/rpiv-test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerAskUserQuestionTool } from "./ask-user-question.js";
 import type { AskUserQuestionConfig } from "./config.js";
+import type { QuestionnaireMouseEvent } from "./state/questionnaire-session.js";
 
 /**
  * Integration tests for the raw `ctx.ui.onTerminalInput` collapse listener.
@@ -45,24 +46,39 @@ interface FakeHandle {
 	isFocused(): boolean;
 }
 
-function makeHandle(over: { isFocused?: () => boolean } = {}): FakeHandle {
+interface RecordingHandle extends FakeHandle {
+	/** Call counters so tests can assert the hide/show hand-off without pi-tui's real state. */
+	calls: { focus: number; unfocus: number };
+}
+
+function makeHandle(over: { isFocused?: () => boolean } = {}): RecordingHandle {
 	let hidden = false;
+	const calls: RecordingHandle["calls"] = { focus: 0, unfocus: 0 };
 	return {
 		hide: () => {},
-		focus: () => {},
-		unfocus: () => {},
+		focus: () => {
+			calls.focus += 1;
+		},
+		unfocus: () => {
+			calls.unfocus += 1;
+		},
 		setHidden: (h: boolean) => {
 			hidden = h;
 		},
 		isHidden: () => hidden,
-		// Mirrors pi-tui: a visible questionnaire overlay normally has focus;
-		// a hidden one never does. Overridable for the other-overlay-on-top case.
+		// Mirrors pi-tui: a visible questionnaire overlay normally owns focus; a hidden
+		// one never does. Overridable for the other-overlay-on-top case.
 		isFocused: over.isFocused ?? (() => !hidden),
+		calls,
 	};
 }
 
 type RawListener = (data: string) => { consume?: boolean } | undefined;
-type SessionComponent = { render(width: number): string[]; handleInput(data: string): void };
+type SessionComponent = {
+	render(width: number): string[];
+	handleInput(data: string): void;
+	handleMouse?(event: QuestionnaireMouseEvent): unknown;
+};
 
 function register() {
 	const { pi, captured } = createMockPi();
@@ -124,22 +140,19 @@ afterEach(() => {
 });
 
 describe("ask_user_question — raw terminal collapse listener", () => {
-	it("hides via OverlayHandle.setHidden, notifies once, and unhides on the second press", async () => {
+	it("hides via OverlayHandle.setHidden and unhides on the second press", async () => {
 		const tool = register();
 		const handle = makeHandle();
-		const { ctx, notify, removeListener, listenerRef } = driveWithListener(handle, (done) => {
-			// First press: hide + one-shot notification with the reopen key.
+		const { ctx, removeListener, listenerRef } = driveWithListener(handle, (done) => {
+			// First press: hide the overlay so chat scrolling and editor focus resume.
 			expect(listenerRef.current?.(CTRL_RBRACKET)).toEqual({ consume: true });
 			expect(handle.isHidden()).toBe(true);
-			expect(notify).toHaveBeenCalledTimes(1);
-			expect(notify).toHaveBeenCalledWith(expect.stringContaining("press Ctrl+] to reopen"), "info");
-			// Second press: unhide, and the notification stays one-shot.
+			// Second press: show it again with answers intact.
 			expect(listenerRef.current?.(CTRL_RBRACKET)).toEqual({ consume: true });
 			expect(handle.isHidden()).toBe(false);
-			// Third round-trip re-hides without a second announcement.
+			// Third round-trip re-hides.
 			expect(listenerRef.current?.(CTRL_RBRACKET)).toEqual({ consume: true });
 			expect(handle.isHidden()).toBe(true);
-			expect(notify).toHaveBeenCalledTimes(1);
 			done({ answers: [], cancelled: true });
 		});
 		await tool.execute?.("tc", params as never, undefined as never, undefined as never, ctx);
@@ -264,6 +277,54 @@ describe("ask_user_question — raw terminal collapse listener", () => {
 			const collapsed = componentRef.current!.render(120);
 			expect(collapsed).toHaveLength(1);
 			expect(collapsed[0]).toContain("Alt+O to expand");
+			done({ answers: [], cancelled: true });
+		});
+		await tool.execute?.("tc", params as never, undefined as never, undefined as never, ctx);
+	});
+
+	it("collapses on a left click on the dialog, consuming the press so motion cannot cancel it", async () => {
+		const tool = register();
+		const handle = makeHandle();
+		const click: QuestionnaireMouseEvent = { type: "click", button: "left", x: 10, y: 2 };
+		const { ctx, componentRef } = driveWithListener(handle, (done) => {
+			expect(componentRef.current!.handleMouse?.({ ...click, type: "press" })).toEqual({
+				handled: true,
+				render: false,
+			});
+			expect(componentRef.current!.handleMouse?.(click)).toEqual({ handled: true, render: true });
+			expect(handle.isHidden()).toBe(true);
+			done({ answers: [], cancelled: true });
+		});
+		await tool.execute?.("tc", params as never, undefined as never, undefined as never, ctx);
+	});
+
+	it("exposes a clickable call row that expands the collapsed dialog", async () => {
+		const tool = register();
+		const handle = makeHandle();
+		const { ctx, componentRef } = driveWithListener(handle, (done) => {
+			componentRef.current!.handleInput(CTRL_RBRACKET);
+			expect(handle.isHidden()).toBe(true);
+			// Pi renders the tool call row through `renderCall` and wraps it in a mouse
+			// region; the click lands on that component, not on the hidden overlay.
+			const callRow = tool.renderCall?.(
+				{ questions: [] } as never,
+				identityTheme as never,
+				{
+					toolCallId: "tc",
+					expanded: false,
+					isPartial: true,
+					isError: false,
+				} as never,
+			) as { handleMouse?: (event: QuestionnaireMouseEvent) => unknown } | undefined;
+			expect(callRow).toBeDefined();
+			expect(callRow!.handleMouse?.({ ...({} as QuestionnaireMouseEvent), type: "press", button: "left" })).toEqual({
+				handled: true,
+				render: false,
+			});
+			expect(
+				callRow!.handleMouse?.({ ...({} as QuestionnaireMouseEvent), type: "click", button: "left" }),
+			).toBeDefined();
+			expect(handle.isHidden()).toBe(false);
 			done({ answers: [], cancelled: true });
 		});
 		await tool.execute?.("tc", params as never, undefined as never, undefined as never, ctx);

@@ -23,19 +23,45 @@ export interface QuestionnaireSessionConfig {
 	/** Key spec for the collapse/expand shortcut, e.g. `"ctrl+]"` or `"alt+o"`. */
 	collapseKey: string;
 	/**
-	 * True iff `execute()` registered the raw `ctx.ui.onTerminalInput` listener — the only
-	 * path that can reach a hidden overlay. Gates the `set_overlay_hidden` effect: a host
-	 * that delivers an `OverlayHandle` but no raw terminal input must fall back to the
-	 * visible one-line collapsed row (which keeps focus and input routing), or collapsing
-	 * would hide the overlay into a state nothing can reopen.
+	 * True iff `execute()` registered the raw `ctx.ui.onTerminalInput` listener. Gates the
+	 * `set_overlay_hidden` effect: hiding is only reversible through that raw listener,
+	 * because pi-tui delivers no input to a hidden overlay. A host without it keeps the
+	 * one-line collapsed row visible and focused, where the component's key router
+	 * expands it.
 	 */
 	canReopenWhileHidden: boolean;
+}
+
+/**
+ * Structural mirror of pi-tui's `TuiMouseEvent` (pi-tui ≥ 1.0). Declared locally instead
+ * of imported so the package keeps compiling against the repo's pinned pre-mouse
+ * pi-tui devDependency: older hosts never call `handleMouse`, newer ones call it with a
+ * superset of these fields.
+ */
+export interface QuestionnaireMouseEvent {
+	type: "press" | "release" | "move" | "drag" | "click" | "wheel";
+	button: "left" | "middle" | "right" | "none";
+	x: number;
+	y: number;
+	/** Consecutive click count when `type` is `click`. */
+	clickCount?: number;
+	/** Shift modifier; hosts that report it let the user bypass the click handler for text selection. */
+	shift?: boolean;
+}
+
+/** Subset of pi-tui's `TuiMouseEventResult` that the session uses. */
+export interface QuestionnaireMouseResult {
+	handled?: boolean;
+	focus?: boolean;
+	render?: boolean;
 }
 
 export interface QuestionnaireSessionComponent {
 	render(width: number): string[];
 	invalidate(): void;
 	handleInput(data: string): void;
+	/** Optional normalized mouse handler; hosts without mouse support never call it. */
+	handleMouse?(event: QuestionnaireMouseEvent): QuestionnaireMouseResult | undefined;
 }
 
 function initialState(): QuestionnaireState {
@@ -123,16 +149,41 @@ export class QuestionnaireSession {
 			render: (width) => (this.state.collapsed ? collapsedRender(width) : built.render(width)),
 			invalidate: built.invalidate,
 			handleInput: (data) => this.dispatch(data),
+			handleMouse: (event) => this.handleMouse(event),
 		};
 	}
 
 	/**
-	 * Collapsed render: a single dim row at the bottom of the overlay. pi-tui sizes
-	 * the overlay to `min(lines.length, maxHeight)`, so returning one line shrinks
-	 * the bottom-anchored overlay from full-height to one row and the transcript
-	 * behind it becomes readable (#47). The overlay stays focused and in the
-	 * stack, so the collapse key still routes here to expand. `t` stays inside the
-	 * closure (live locale updates); the key display is static per session.
+	 * A left click anywhere on the visible dialog collapses it. The press is consumed so
+	 * the renderer's press-gesture path owns the gesture and synthesizes `click` on a
+	 * release at the same cell: terminals that report all mouse motion (pi-tui's default
+	 * `?1003h` mode, e.g. Herdr) emit move events between press and release, and the
+	 * renderer's text-selection fallback turns every one of them into a drag — which
+	 * cancels the synthesized click. Taking the press costs drag-to-select inside the
+	 * dialog, so a Shift press passes straight through to the renderer's selection path.
+	 * Collapsing hides the overlay, so no focus flag is needed on the result; expanding
+	 * is driven from the transcript call row (`view/components/call-line.ts`) or the raw
+	 * collapse-key listener.
+	 */
+	private handleMouse(event: QuestionnaireMouseEvent): QuestionnaireMouseResult | undefined {
+		if (event.button !== "left" || event.shift === true) return undefined;
+		if (this.inputEditorOpen) return undefined;
+		if (event.type === "press") return { handled: true, render: false };
+		if (event.type !== "click") return undefined;
+		if ((event.clickCount ?? 1) > 1) return undefined;
+		this.toggleCollapsedExternal();
+		return { handled: true, render: true };
+	}
+
+	/**
+	 * Collapsed render for hosts that cannot hide the overlay (no raw terminal input to
+	 * reopen it): a single dim row at the bottom, kept visible and focused. pi-tui sizes
+	 * the overlay to `min(lines.length, maxHeight)`, so returning one line shrinks the
+	 * bottom-anchored overlay to one row and the transcript behind it becomes readable
+	 * (#47). On hosts that can hide it, collapse emits `set_overlay_hidden` and the
+	 * transcript's `ask_user_question` call row becomes the expand affordance instead.
+	 * `t` stays inside the closure (live locale updates); the key display is static per
+	 * session.
 	 *
 	 * With collapseKey "off" the router and raw listener never toggle `collapsed`,
 	 * but `toggleCollapsedExternal()` is a public ungated entry — fall back to the
@@ -194,11 +245,12 @@ export class QuestionnaireSession {
 				return;
 			case "set_overlay_hidden":
 				// No-op until `setOverlayHandle` has been called (the handle arrives via
-				// `ctx.ui.custom`'s `onHandle` right after the overlay is shown), and
-				// suppressed entirely when no raw terminal listener exists — hiding would
-				// then be irreversible (pi-tui routes no input to a hidden overlay), so the
-				// visible one-line collapsed row serves as the fallback rendering instead.
-				if (this.canReopenWhileHidden) this.overlayHandle?.setHidden(effect.hidden);
+				// `ctx.ui.custom`'s `onHandle` right after the overlay is shown), and suppressed
+				// entirely when no raw terminal listener exists — hiding would then be
+				// irreversible (pi-tui routes no input to a hidden overlay), so the visible
+				// one-line collapsed row serves as the fallback rendering instead.
+				if (!this.canReopenWhileHidden) return;
+				this.overlayHandle?.setHidden(effect.hidden);
 				return;
 			case "done":
 				this.done(effect.result);
@@ -264,22 +316,38 @@ export class QuestionnaireSession {
 
 	/**
 	 * Setter for the overlay handle, called by `ctx.ui.custom`'s `onHandle` callback once
-	 * the TUI has created the overlay. Until this is called, `set_overlay_hidden` effects
+	 * the TUI has created the overlay. Until this is called, `set_overlay_focus` effects
 	 * are no-ops — the session still tracks `state.collapsed` for the view layer.
 	 */
 	setOverlayHandle(handle: OverlayHandle): void {
 		this.overlayHandle = handle;
 	}
 
+	/** True while the dialog is collapsed to its one-line hint row. */
+	isCollapsed(): boolean {
+		return this.state.collapsed;
+	}
+
 	/**
 	 * Public toggle used by the raw terminal input listener registered in `execute()`.
-	 * pi-tui does not route input to a hidden overlay's `component.handleInput`, so the
-	 * raw listener (which fires for terminal data regardless of overlay visibility)
-	 * reaches the session through this method instead of the dispatch path. Routed
-	 * through `commit` so the transition stays in the reducer and the overlay hide
-	 * happens via the `set_overlay_hidden` effect like every other side effect.
+	 * pi-tui routes no input to a hidden overlay's `component.handleInput`, so the raw
+	 * listener (which fires for terminal data regardless of overlay visibility) reaches
+	 * the session through this method instead. Routed through `commit` so the transition
+	 * stays in the reducer and the overlay hide/show happens via the
+	 * `set_overlay_hidden` effect like every other side effect.
 	 */
 	toggleCollapsedExternal(): void {
+		if (!this.inputEditorOpen) this.commit({ kind: "toggle_collapsed" });
+	}
+
+	/**
+	 * Public expand used by the transcript `ask_user_question` call row
+	 * (`view/components/call-line.ts`). No-op while the dialog is already expanded (or
+	 * while the external editor owns the terminal), so clicking the row never collapses
+	 * the dialog it is meant to bring back.
+	 */
+	expandExternal(): void {
+		if (!this.state.collapsed) return;
 		if (!this.inputEditorOpen) this.commit({ kind: "toggle_collapsed" });
 	}
 }

@@ -61,6 +61,7 @@
 		"tool/types.ts",
 		"tool/validate-questionnaire.ts",
 		"view/component-binding.ts",
+		"view/components/call-line.ts",
 		"view/components/inline-input.ts",
 		"view/components/multi-select-view.ts",
 		"view/components/option-list-view.ts",

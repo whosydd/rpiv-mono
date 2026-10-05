@@ -17,6 +17,8 @@ adapts to the size of your terminal.
 | `Ctrl+G` | Open Pi's configured external editor with the current custom-answer draft. | `Type something.` input |
 | `Ctrl+U` | Clear the current custom-answer draft. | `Type something.` input |
 | `Ctrl+]` | Collapse or expand the dialog. Configurable via `collapseKey`. | Everywhere, including while collapsed |
+| Click | Collapse the dialog; on the `ask_user_question` call block in the transcript, expand it again. | Anywhere on the dialog / on the call block, in Pi's fullscreen TUI |
+| `Shift`+drag | Select text instead of toggling. | Dialog and call block, in Pi's fullscreen TUI |
 
 The table names the default keys; the dialog actually follows your Pi keybindings.
 Confirm listens to both `tui.select.confirm` and `tui.input.submit`, and a key bound to
@@ -72,18 +74,30 @@ keystrokes edit the buffer, so `n` types an `n`. Pasted line breaks are preserve
 
 ## Collapse mode
 
-`Ctrl+]` gets the dialog out of the way: the overlay is marked hidden in Pi's overlay
-stack and shrinks to a single dim hint row, so the transcript it was covering becomes
-readable and chat scrolling resumes. Press the same key to bring the questionnaire back
-with your answers intact. The first time you collapse, Pi notifies you with the key to
-press — that message names your configured key.
+`Ctrl+]` — or a left click anywhere on the dialog, in Pi's fullscreen TUI — gets the
+dialog out of the way: the overlay is hidden, so the transcript it was covering becomes
+readable and chat scrolling resumes. The `ask_user_question` call block stays in the
+transcript; click it anywhere (the arguments line, its side gutters, or the background
+rows above and below) to bring the questionnaire back with your answers intact, or press
+the same key. Hiding is only used on hosts that expose raw terminal input (the only path
+that can deliver the collapse key to a hidden overlay); elsewhere the dialog shrinks to a
+visible one-line row that the same key expands.
 
-Because Pi routes no input to a hidden overlay, the collapse key is additionally captured
-at the raw terminal level. It only acts when the questionnaire is hidden or focused, so a
-different overlay on top of it (for example `/btw`) keeps its keystrokes.
+The dialog owns the left press so a click is recognized even when the terminal reports
+mouse motion between press and release (Pi's fullscreen mode enables all-motion
+reporting). That means drag-to-select over the dialog or the call block is unavailable
+unless you hold `Shift`: a `Shift` drag goes straight to Pi's selection and copies as
+usual.
 
-While collapsed, every keystroke other than cancel is ignored, so you cannot mutate
-answers you cannot see.
+Collapsing also hands keyboard and mouse-wheel input back to the chat: Pi defers wheel
+events to a focused overlay, so the dialog releases overlay focus while collapsed. The
+collapse key is additionally captured at the raw terminal level, because a released
+overlay no longer receives `handleInput`. It only acts when the questionnaire is collapsed
+or focused, so a different overlay on top of it (for example `/btw`) keeps its keystrokes.
+
+While the dialog still owns the keyboard, every keystroke other than cancel is ignored,
+so you cannot mutate answers you cannot see. Once focus has been released, the chat
+editor takes those keystrokes instead.
 
 The default `ctrl+]` is free in Terminal.app, iTerm2, Warp, tmux, zellij and screen. On
 keyboard layouts where `]` sits on the shifted layer — Latin American `es-AR` / `es-MX`,

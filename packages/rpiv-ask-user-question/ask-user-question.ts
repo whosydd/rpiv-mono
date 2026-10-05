@@ -1,12 +1,6 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, isKeyRepeat, matchesKey, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
-import {
-	COLLAPSE_KEY_OFF,
-	formatKeySpecForDisplay,
-	loadConfig,
-	resolveCollapseKey,
-	validateGuidanceFields,
-} from "./config.js";
+import { COLLAPSE_KEY_OFF, loadConfig, resolveCollapseKey, validateGuidanceFields } from "./config.js";
 import {
 	ASK_USER_BLOCKED_EVENT,
 	ASK_USER_PROMPT_EVENT,
@@ -31,6 +25,7 @@ import {
 	QuestionParamsSchema,
 } from "./tool/types.js";
 import { validateQuestionnaire } from "./tool/validate-questionnaire.js";
+import { QuestionnaireCallLine, QuestionnaireResultBlock } from "./view/components/call-line.js";
 import type { WrappingSelectItem } from "./view/components/wrapping-select.js";
 
 function emitAskUserPromptEvent(pi: ExtensionAPI, params: QuestionParams): void {
@@ -156,9 +151,9 @@ export async function loadQuestionnaireSession(): Promise<SessionLoad> {
 }
 
 /**
- * Register the raw terminal listener that toggles collapse while the overlay is hidden.
- * Returns the remover, or undefined when the key is off / the host has no raw input hook —
- * callers derive `canReopenWhileHidden` from that.
+ * Register the raw terminal listener that toggles collapse while the overlay does not
+ * own the keyboard. Returns the remover, or undefined when the key is off / the host has
+ * no raw input hook — callers derive `canReopenWhileHidden` from that.
  */
 function registerCollapseKeyListener(
 	ctx: ExtensionContext,
@@ -167,28 +162,34 @@ function registerCollapseKeyListener(
 	overlayHandleRef: OverlayHandleRef,
 ): (() => void) | undefined {
 	if (collapseKey === COLLAPSE_KEY_OFF || typeof ctx.ui.onTerminalInput !== "function") return undefined;
-	let hasAnnouncedHide = false;
 	return ctx.ui.onTerminalInput((data) => {
 		const handle = overlayHandleRef.current;
-		if (!handle) return undefined;
-		// Only act while the questionnaire is hidden (its handleInput is
-		// unreachable) or actually focused. When some other overlay is on
-		// top (e.g. `/btw`), leave the keystroke to that overlay instead of
-		// toggling the questionnaire from underneath it.
-		if (!handle.isHidden() && !handle.isFocused()) return undefined;
+		const session = sessionRef.current;
+		if (!handle || !session) return undefined;
+		// Act while the questionnaire owns the keyboard (expanded and focused) or while
+		// it is collapsed. Collapsing releases overlay focus to the chat, so this raw
+		// listener is the only path that can expand it again. When some other overlay is
+		// on top (e.g. `/btw`), leave the keystroke to that overlay instead of toggling
+		// the questionnaire from underneath it.
+		if (!session.isCollapsed() && !handle.isFocused()) return undefined;
 		if (!matchesKey(data, collapseKey as Parameters<typeof matchesKey>[1])) return undefined;
 		// Kitty-protocol terminals report press, repeat, and release separately.
 		// Toggle only on the initial press so a tap does not immediately reopen
 		// the overlay and a held key does not toggle it repeatedly.
 		if (isKeyRelease(data) || isKeyRepeat(data)) return { consume: true };
-		sessionRef.current?.toggleCollapsedExternal();
-		if (handle.isHidden() && !hasAnnouncedHide) {
-			hasAnnouncedHide = true;
-			ctx.ui.notify?.(`ask_user_question hidden — press ${formatKeySpecForDisplay(collapseKey)} to reopen`, "info");
-		}
+		session.toggleCollapsedExternal();
 		return { consume: true };
 	});
 }
+
+/**
+ * Live questionnaires keyed by tool-call id. The transcript call row
+ * (`renderCall`, see `view/components/call-line.ts`) looks its session up here so a
+ * click on the row can expand a collapsed dialog. Entries exist only while a call is
+ * awaiting an answer; after the result lands the lookup misses and Pi's default
+ * result-expansion click takes the row back.
+ */
+const sessionsByToolCallId = new Map<string, SessionRef>();
 
 /**
  * Build the `ctx.ui.custom` component factory: constructs the session (capturing it in
@@ -321,7 +322,44 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 		promptGuidelines: guidance.promptGuidelines ?? DEFAULT_PROMPT_GUIDELINES,
 		parameters: QuestionParamsSchema,
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		// Self-rendered shell: the default Box rejects mouse events in its gutters and pad
+		// rows, so the whole tool block is drawn here instead (background + padding mirror
+		// the default) and every pixel of the call block can expand the collapsed dialog.
+		renderShell: "self",
+
+		// Replaces Pi's default call block with an identical-looking one that is clickable
+		// while the questionnaire is collapsed. Pi wraps both the call and result blocks in
+		// a `MouseRegion`, so our handler sees the event first and declines it whenever the
+		// dialog is not collapsed.
+		renderCall: (args, theme, context) => {
+			const session = () => sessionsByToolCallId.get(context.toolCallId)?.current ?? null;
+			return new QuestionnaireCallLine({
+				title: ASK_USER_QUESTION_TOOL_NAME,
+				args,
+				theme,
+				expanded: context.expanded,
+				isPartial: context.isPartial,
+				isError: context.isError,
+				canExpand: () => session()?.isCollapsed() ?? false,
+				expand: () => session()?.expandExternal(),
+			});
+		},
+
+		renderResult: (result, options, theme, context) => {
+			const text = result.content
+				.filter((block): block is { type: "text"; text: string } => block.type === "text")
+				.map((block) => block.text)
+				.join("\n");
+			return new QuestionnaireResultBlock({
+				text,
+				theme,
+				expanded: options.expanded,
+				isPartial: options.isPartial,
+				isError: context.isError,
+			});
+		},
+
+		async execute(toolCallId, params, _signal, _onUpdate, ctx) {
 			// Line-terminator normalization runs once here, ahead of validation, so
 			// every downstream consumer — validator, TUI, RPC walker, envelope, prompt
 			// event — sees the same clean text (#192).
@@ -371,10 +409,12 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 			// not route input to a hidden overlay's `component.handleInput`).
 			const sessionRef: SessionRef = { current: null };
 			const overlayHandleRef: OverlayHandleRef = { current: undefined };
+			sessionsByToolCallId.set(toolCallId, sessionRef);
 			const removeOverlayInputListener = registerCollapseKeyListener(ctx, collapseKey, sessionRef, overlayHandleRef);
-			// Hiding the overlay is only reversible through the raw listener above, so
-			// the session may emit `setHidden` only when it was actually registered;
-			// otherwise collapse falls back to the visible one-line row.
+			// Hiding the overlay is only reversible through the raw listener above or a
+			// click on the transcript call row, so the session may emit `setHidden` only
+			// when a raw-listener reopen path exists; otherwise it falls back to the
+			// visible one-line collapsed row that keeps focus and input routing.
 			const canReopenWhileHidden = removeOverlayInputListener !== undefined;
 
 			emitAskUserBlockedEvent(pi, true, typed.questions[0]?.question);
@@ -412,6 +452,7 @@ export function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 				return buildQuestionnaireResponse(result, typed);
 			} finally {
 				removeOverlayInputListener?.();
+				sessionsByToolCallId.delete(toolCallId);
 				emitAskUserBlockedEvent(pi, false);
 			}
 		},

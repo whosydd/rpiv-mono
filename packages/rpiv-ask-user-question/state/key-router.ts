@@ -286,11 +286,12 @@ export function routeKey(data: string, state: QuestionnaireState, runtime: Quest
 	// works from every inner state (notes, inputMode, submit tab, multi-select)
 	// without reaching any branch that would otherwise consume the keystroke. The
 	// questionnaire overlay is fully hidden via `OverlayHandle.setHidden(true)` while
-	// collapsed; pi-tui's overlay stack updates accordingly, so overlay-aware consumers
-	// (e.g. `pi-station`) see no visible modal and chat scroll resumes. The toggle key is
-	// also captured at the raw terminal level via `ctx.ui.onTerminalInput` so it still
-	// routes here when the overlay is hidden (pi-tui does not deliver input to a hidden
-	// overlay's `component.handleInput`).
+	// collapsed, so overlay-aware consumers see no visible modal, chat scroll resumes,
+	// and the transcript's `ask_user_question` call row becomes the mouse path back
+	// (see `view/components/call-line.ts`). The toggle key is also captured at the raw
+	// terminal level via `ctx.ui.onTerminalInput` so it still routes there while the
+	// overlay is hidden (pi-tui does not deliver input to a hidden overlay's
+	// `component.handleInput`).
 	//
 	// The default `ctrl+]` is free in every mainstream macOS terminal (Terminal.app,
 	// iTerm2, Warp), every multiplexer (tmux, zellij, screen — none use it as a prefix),

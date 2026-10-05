@@ -25,10 +25,12 @@ export type Effect =
 	| { kind: "forward_notes_keystroke"; data: string }
 	/**
 	 * Tell the session to hide or show its underlying overlay. Emitted by the
-	 * `toggle_collapsed` action so the runtime can call `OverlayHandle.setHidden(...)`,
-	 * which lets other overlay-aware consumers (e.g. `pi-station`) see the questionnaire
-	 * as truly hidden and resume normal chat scroll while the user reads the transcript
-	 * behind the modal.
+	 * `toggle_collapsed` action. Collapsing hides the whole overlay so the chat owns the
+	 * screen again; the `ask_user_question` tool-call row rendered from the transcript
+	 * (see `view/components/call-line.ts`) and the raw collapse-key listener are the ways
+	 * back. The runtime gates hiding on the raw terminal listener
+	 * (`canReopenWhileHidden`): without it a hidden overlay has no keyboard path back, so
+	 * those hosts keep the visible one-line collapsed row instead.
 	 */
 	| { kind: "set_overlay_hidden"; hidden: boolean }
 	| { kind: "done"; result: QuestionnaireResult };

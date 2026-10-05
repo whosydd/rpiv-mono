@@ -68,6 +68,8 @@ Some parts of the dialog exist only under the right conditions:
 | Side-by-side preview | An option carries a `preview`, and terminal and pane are both ≥ 100 columns |
 | Preview pane at all | Single-select questions only |
 | Collapse shortcut | `collapseKey` is not `"off"` |
+| Click to collapse | The host forwards mouse events (Pi's fullscreen TUI) |
+| Click the call block to expand | The host renders extension tool calls (`renderShell`/`renderCall`) and forwards mouse events; without that support the `collapseKey` shortcut still expands |
 | Full overlay hide on collapse | The host also exposes raw terminal input (the only path that can reopen a hidden overlay); without it, collapsing shrinks the dialog to a visible one-line row instead |
 | Localized chrome | `@juicesharp/rpiv-i18n` is installed |
 

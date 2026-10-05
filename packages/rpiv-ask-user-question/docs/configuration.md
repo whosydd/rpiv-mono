@@ -86,9 +86,10 @@ unknown parts, so a typo like `"ctr+]"` would otherwise silently capture every b
 keypress at the terminal level.
 
 The footer hint inside the dialog names whatever key you configure (`Alt+O to collapse`
-for `"alt+o"`), as do the collapsed one-line footer and the one-shot notification shown
-when the dialog is first hidden. With `"off"` the collapse hint is dropped from the
-footer entirely, since no shortcut can fire.
+for `"alt+o"`), as does the collapsed one-line footer on hosts that cannot hide the
+overlay. With `"off"` the collapse hint is dropped from the footer entirely, since no
+shortcut can fire; a left click on the dialog still collapses it, because the pointer
+affordance is independent of the keyboard shortcut, and the call row still expands it.
 
 ### `guidance.description`, `guidance.promptSnippet` and `guidance.promptGuidelines`
 

@@ -5,6 +5,16 @@ All notable changes to `@juicesharp/rpiv-ask-user-question` are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- A left click anywhere on the questionnaire now collapses it, and a left click anywhere on its `ask_user_question questions=[…]` call block in the transcript expands it again. The tool renders its own shell so the whole block — the arguments line, its gutters, and the pad rows above and below — is clickable while mirroring Pi's default framing (background, padding, and arguments formatting). The block only takes the click while the dialog is collapsed; once the questionnaire is answered, clicks on it toggle the tool result exactly as before. The dialog consumes the left press so click detection survives the all-motion mouse reporting of Pi's fullscreen TUI; hold `Shift` to drag-select text instead. The `collapseKey` shortcut keeps working in both directions, including while hidden, and a left click still collapses even when `collapseKey` is `"off"`.
+
+### Changed
+
+- Collapsing hides the overlay outright again (chat scrolling, editor focus, and overlay-aware consumers all resume); the visible one-line row remains only as the fallback for hosts that expose no raw terminal input, where nothing else could reopen a hidden overlay. The one-shot "ask_user_question hidden — press … to reopen" notification is gone: the call row is the visible expand affordance.
+
 ## [2.12.0] - 2026-09-30
 
 ### Fixed

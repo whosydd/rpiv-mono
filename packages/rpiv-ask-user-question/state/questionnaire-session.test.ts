@@ -4,7 +4,7 @@ import { makeTheme } from "@juicesharp/rpiv-test-utils";
 import { describe, expect, it, vi } from "vitest";
 import type { QuestionnaireResult, QuestionParams } from "../tool/types.js";
 import type { WrappingSelectItem } from "../view/components/wrapping-select.js";
-import { QuestionnaireSession } from "./questionnaire-session.js";
+import { type QuestionnaireMouseEvent, QuestionnaireSession } from "./questionnaire-session.js";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
@@ -71,6 +71,8 @@ interface SessionTestOptions {
 	itemsByTab?: WrappingSelectItem[][];
 	editInput?: (value: string) => Promise<string | undefined>;
 	keybindings?: typeof keybindings;
+	canReopenWhileHidden?: boolean;
+	collapseKey?: string;
 }
 
 function makeSession(options: SessionTestOptions = {}) {
@@ -84,8 +86,8 @@ function makeSession(options: SessionTestOptions = {}) {
 		done,
 		keybindings: options.keybindings ?? keybindings,
 		editInput: options.editInput ?? (async () => undefined),
-		collapseKey: "off",
-		canReopenWhileHidden: false,
+		collapseKey: options.collapseKey ?? "off",
+		canReopenWhileHidden: options.canReopenWhileHidden ?? false,
 	});
 	return { session, done };
 }
@@ -310,5 +312,130 @@ describe("QuestionnaireSession — collapsed row with collapseKey 'off'", () => 
 		expect(collapsed[0]).toContain("Esc to cancel");
 		expect(collapsed[0]).not.toContain("to expand");
 		expect(collapsed[0]).not.toContain("Off");
+	});
+});
+
+function makeMouseEvent(over: Partial<QuestionnaireMouseEvent> = {}): QuestionnaireMouseEvent {
+	return { type: "click", button: "left", x: 10, y: 2, ...over };
+}
+
+describe("QuestionnaireSession — mouse collapse toggle", () => {
+	it("takes the left press so the renderer owns the gesture and synthesizes the click", () => {
+		const { session } = makeSession();
+		// Same-cell motion between press and release kills the renderer's selection-path
+		// click synthesis; the press-gesture path tolerates it, so the press must be handled.
+		expect(session.component.handleMouse?.(makeMouseEvent({ type: "press" }))).toEqual({
+			handled: true,
+			render: false,
+		});
+		expect(session.isCollapsed()).toBe(false);
+	});
+
+	it("collapses on a left click of the visible dialog", () => {
+		const { session } = makeSession();
+		expect(session.component.handleMouse?.(makeMouseEvent())).toEqual({ handled: true, render: true });
+		expect(session.isCollapsed()).toBe(true);
+		expect(session.component.render(120)).toHaveLength(1);
+	});
+
+	it("a second click on the visible dialog expands it again (round-trip)", () => {
+		const { session } = makeSession();
+		session.component.handleMouse?.(makeMouseEvent());
+		expect(session.component.handleMouse?.(makeMouseEvent())).toEqual({ handled: true, render: true });
+		expect(session.isCollapsed()).toBe(false);
+		expect(session.component.render(120).length).toBeGreaterThan(1);
+	});
+
+	it("toggles even when collapseKey is 'off' — the pointer affordance is independent of the keyboard shortcut", () => {
+		const { session } = makeSession();
+		session.component.handleMouse?.(makeMouseEvent());
+		expect(session.isCollapsed()).toBe(true);
+	});
+
+	it("leaves Shift gestures to the renderer so text inside the dialog stays selectable", () => {
+		const { session } = makeSession();
+		expect(session.component.handleMouse?.(makeMouseEvent({ shift: true }))).toBeUndefined();
+		expect(session.component.handleMouse?.(makeMouseEvent({ type: "press", shift: true }))).toBeUndefined();
+		expect(session.isCollapsed()).toBe(false);
+	});
+
+	it.each([
+		["right click", makeMouseEvent({ button: "right" })],
+		["right press", makeMouseEvent({ type: "press", button: "right" })],
+		["release", makeMouseEvent({ type: "release" })],
+		["wheel", makeMouseEvent({ type: "wheel" })],
+		["drag", makeMouseEvent({ type: "drag" })],
+		["double click", makeMouseEvent({ clickCount: 2 })],
+	])("ignores %s", (_label, event) => {
+		const { session } = makeSession();
+		expect(session.component.handleMouse?.(event)).toBeUndefined();
+		expect(session.isCollapsed()).toBe(false);
+	});
+});
+
+describe("QuestionnaireSession — collapse hides the overlay via the handle", () => {
+	function makeRecordingHandle() {
+		let hidden = false;
+		const calls = { focus: 0, unfocus: 0, setHidden: [] as boolean[] };
+		return {
+			handle: {
+				hide: () => {},
+				setHidden: (h: boolean) => {
+					hidden = h;
+					calls.setHidden.push(h);
+				},
+				isHidden: () => hidden,
+				focus: () => {
+					calls.focus += 1;
+				},
+				unfocus: () => {
+					calls.unfocus += 1;
+				},
+				isFocused: () => !hidden,
+			},
+			calls,
+		};
+	}
+
+	it("hides on collapse and shows again on expand when the raw listener can reopen it", () => {
+		const { session } = makeSession({ canReopenWhileHidden: true });
+		const { handle, calls } = makeRecordingHandle();
+		session.setOverlayHandle(handle as never);
+
+		session.toggleCollapsedExternal();
+		expect(calls.setHidden).toEqual([true]);
+		expect(handle.isHidden()).toBe(true);
+
+		session.toggleCollapsedExternal();
+		expect(calls.setHidden).toEqual([true, false]);
+		expect(handle.isHidden()).toBe(false);
+	});
+
+	it("never hides when no raw listener exists — the visible one-line row stays the only path back", () => {
+		const { session } = makeSession({ canReopenWhileHidden: false });
+		const { handle, calls } = makeRecordingHandle();
+		session.setOverlayHandle(handle as never);
+
+		session.toggleCollapsedExternal();
+		expect(session.isCollapsed()).toBe(true);
+		expect(calls.setHidden).toEqual([]);
+		expect(handle.isHidden()).toBe(false);
+	});
+});
+
+describe("QuestionnaireSession — expandExternal", () => {
+	it("expands a collapsed dialog (the transcript call row click path)", () => {
+		const { session } = makeSession();
+		session.toggleCollapsedExternal();
+		expect(session.isCollapsed()).toBe(true);
+
+		session.expandExternal();
+		expect(session.isCollapsed()).toBe(false);
+	});
+
+	it("is a no-op while the dialog is already expanded, so a click on the call row cannot collapse it", () => {
+		const { session } = makeSession();
+		session.expandExternal();
+		expect(session.isCollapsed()).toBe(false);
 	});
 });
