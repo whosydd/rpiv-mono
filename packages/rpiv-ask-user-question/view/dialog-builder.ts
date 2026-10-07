@@ -25,7 +25,11 @@ export const HINT_PART_CANCEL = "Esc to cancel";
  * lookup, so per-locale word order is preserved.
  */
 export const KEY_PLACEHOLDER = "{key}";
-export const HINT_PART_COLLAPSE_TEMPLATE = `${KEY_PLACEHOLDER} to collapse`;
+/**
+ * Collapsing is a double-click (a single click would fire on every pane-focus click a
+ * multiplexer forwards into the pane), so the copy names both gestures.
+ */
+export const HINT_PART_COLLAPSE_TEMPLATE = `${KEY_PLACEHOLDER} or double-click to collapse`;
 export const HINT_PART_EXPAND_TEMPLATE = `${KEY_PLACEHOLDER} to expand`;
 /** Default-key (`Ctrl+]`) rendering of the collapse template, for tests and default-config assertions. */
 export const HINT_PART_COLLAPSE = HINT_PART_COLLAPSE_TEMPLATE.replace(

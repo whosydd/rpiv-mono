@@ -12,7 +12,7 @@
   "hint.toggle": "Space to toggle",
   "hint.notes": "n to add notes",
   "hint.tab": "Tab to switch questions",
-  "hint.collapse": "{key} to collapse",
+  "hint.collapse": "{key} or double-click to collapse",
   "hint.expand_line": "{key} to expand · Esc to cancel",
   "hint.cancel": "Esc to cancel",
 

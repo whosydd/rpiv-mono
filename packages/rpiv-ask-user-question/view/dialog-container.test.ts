@@ -274,7 +274,7 @@ describe("makeDialog — multi-question (question tab)", () => {
 		const joined = makeDialog(makeConfig({ collapseKey: "alt+o" }))
 			.render(160)
 			.join("\n");
-		expect(joined).toContain("Alt+O to collapse");
+		expect(joined).toContain("Alt+O or double-click to collapse");
 		expect(joined).not.toContain("Ctrl+]");
 	});
 

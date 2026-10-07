@@ -27,8 +27,8 @@ export interface QuestionnaireState {
 	/**
 	 * Collapsed mode: the questionnaire gets out of the way so the agent transcript behind
 	 * the bottom-anchored overlay becomes readable and scrollable. Toggled by the
-	 * configured collapse key or a left click anywhere on the dialog. Two renderings,
-	 * chosen by host capability:
+	 * configured collapse key or a double-click anywhere on the dialog (a single click
+	 * only expands). Two renderings, chosen by host capability:
 	 *
 	 * - Hosts with an `OverlayHandle` AND a raw `onTerminalInput` listener (real pi-tui):
 	 *   the `set_overlay_hidden` effect hides the overlay entirely — chat scrolling and

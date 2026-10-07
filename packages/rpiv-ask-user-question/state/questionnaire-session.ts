@@ -101,6 +101,8 @@ export class QuestionnaireSession {
 	private readonly collapseKey: string;
 	private readonly canReopenWhileHidden: boolean;
 	private inputEditorOpen = false;
+	/** See {@link handleMouse}: last click routed to the dialog, used to pair a double-click. */
+	private lastDialogClick: { x: number; y: number; count: number; expanded: boolean } | undefined;
 
 	/**
 	 * Overlay handle captured by `ctx.ui.custom`'s `onHandle` callback. Lets the session
@@ -154,23 +156,50 @@ export class QuestionnaireSession {
 	}
 
 	/**
-	 * A left click anywhere on the visible dialog collapses it. The press is consumed so
-	 * the renderer's press-gesture path owns the gesture and synthesizes `click` on a
-	 * release at the same cell: terminals that report all mouse motion (pi-tui's default
-	 * `?1003h` mode, e.g. Herdr) emit move events between press and release, and the
-	 * renderer's text-selection fallback turns every one of them into a drag — which
-	 * cancels the synthesized click. Taking the press costs drag-to-select inside the
-	 * dialog, so a Shift press passes straight through to the renderer's selection path.
-	 * Collapsing hides the overlay, so no focus flag is needed on the result; expanding
-	 * is driven from the transcript call row (`view/components/call-line.ts`) or the raw
-	 * collapse-key listener.
+	 * Pointer toggle for the dialog: a single left click expands, a double-click
+	 * collapses. The asymmetry is deliberate. Expanding stays single-click because on
+	 * hosts that cannot hide the overlay the visible one-line row is the only pointer
+	 * path back; collapsing needs the second click because no in-app signal distinguishes
+	 * a deliberate click from the click a multiplexer forwards into the pane while it
+	 * grants that pane focus (Herdr pushes both the pane mouse event and `PaneFocus` for
+	 * the same press). With single-click collapse, simply switching to the pane dismissed
+	 * the questionnaire; a double-click makes that accidental gesture a no-op.
+	 *
+	 * The press is consumed so the renderer's press-gesture path owns the gesture and
+	 * synthesizes `click` on a release at the same cell: terminals that report all mouse
+	 * motion (pi-tui's default `?1003h` mode, e.g. Herdr) emit move events between press
+	 * and release, and the renderer's text-selection fallback turns every one of them
+	 * into a drag — which cancels the synthesized click. Taking the press costs
+	 * drag-to-select inside the dialog, so a Shift press passes straight through to the
+	 * renderer's selection path. Collapsing hides the overlay, so no focus flag is needed
+	 * on the result; expanding is driven from the transcript call row
+	 * (`view/components/call-line.ts`) or the raw collapse-key listener.
 	 */
 	private handleMouse(event: QuestionnaireMouseEvent): QuestionnaireMouseResult | undefined {
 		if (event.button !== "left" || event.shift === true) return undefined;
 		if (this.inputEditorOpen) return undefined;
 		if (event.type === "press") return { handled: true, render: false };
 		if (event.type !== "click") return undefined;
-		if ((event.clickCount ?? 1) > 1) return undefined;
+		const clickCount = event.clickCount ?? 1;
+		// The renderer groups same-cell clicks within its double-click window into a run;
+		// mirror just enough of that to recognize the click paired with an expand below.
+		const partner =
+			this.lastDialogClick !== undefined &&
+			this.lastDialogClick.x === event.x &&
+			this.lastDialogClick.y === event.y &&
+			this.lastDialogClick.count + 1 === clickCount;
+		if (this.state.collapsed) {
+			// Only the first click of a run expands the visible one-line row; its partner is
+			// swallowed so the double-click cannot re-collapse what it just reopened.
+			const expands = clickCount === 1;
+			this.lastDialogClick = { x: event.x, y: event.y, count: clickCount, expanded: expands };
+			if (!expands) return { handled: true, render: false };
+			this.toggleCollapsedExternal();
+			return { handled: true, render: true };
+		}
+		const previousExpanded = this.lastDialogClick?.expanded === true;
+		this.lastDialogClick = { x: event.x, y: event.y, count: clickCount, expanded: false };
+		if (clickCount < 2 || (partner && previousExpanded)) return { handled: true, render: false };
 		this.toggleCollapsedExternal();
 		return { handled: true, render: true };
 	}

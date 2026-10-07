@@ -17,7 +17,8 @@ adapts to the size of your terminal.
 | `Ctrl+G` | Open Pi's configured external editor with the current custom-answer draft. | `Type something.` input |
 | `Ctrl+U` | Clear the current custom-answer draft. | `Type something.` input |
 | `Ctrl+]` | Collapse or expand the dialog. Configurable via `collapseKey`. | Everywhere, including while collapsed |
-| Click | Collapse the dialog; on the `ask_user_question` call block in the transcript, expand it again. | Anywhere on the dialog / on the call block, in Pi's fullscreen TUI |
+| Double-click | Collapse the dialog. | Anywhere on the dialog, in Pi's fullscreen TUI |
+| Click | Expand the dialog again: on the `ask_user_question` call block in the transcript, or on the collapsed one-line row (hosts that cannot hide the overlay). | Pi's fullscreen TUI |
 | `Shift`+drag | Select text instead of toggling. | Dialog and call block, in Pi's fullscreen TUI |
 
 The table names the default keys; the dialog actually follows your Pi keybindings.
@@ -74,14 +75,21 @@ keystrokes edit the buffer, so `n` types an `n`. Pasted line breaks are preserve
 
 ## Collapse mode
 
-`Ctrl+]` — or a left click anywhere on the dialog, in Pi's fullscreen TUI — gets the
-dialog out of the way: the overlay is hidden, so the transcript it was covering becomes
-readable and chat scrolling resumes. The `ask_user_question` call block stays in the
-transcript; click it anywhere (the arguments line, its side gutters, or the background
+`Ctrl+]` — or a double-click anywhere on the dialog, in Pi's fullscreen TUI — gets
+the dialog out of the way: the overlay is hidden, so the transcript it was covering
+becomes readable and chat scrolling resumes. The `ask_user_question` call block stays in
+the transcript; click it anywhere (the arguments line, its side gutters, or the background
 rows above and below) to bring the questionnaire back with your answers intact, or press
 the same key. Hiding is only used on hosts that expose raw terminal input (the only path
 that can deliver the collapse key to a hidden overlay); elsewhere the dialog shrinks to a
-visible one-line row that the same key expands.
+visible one-line row that the same key — or a single click on the row — expands.
+
+Collapsing needs the deliberate double-click because no app-side signal separates it from
+the click a multiplexer forwards into the pane while granting that pane focus: Herdr
+pushes the pane mouse event and the focus change for the same press, so a single-click
+collapse fired every time you clicked the pane to switch to it. Expanding stays a single
+click because it is harmless and, on hosts that cannot hide the overlay, the one-line row
+is the only pointer path back.
 
 The dialog owns the left press so a click is recognized even when the terminal reports
 mouse motion between press and release (Pi's fullscreen mode enables all-motion

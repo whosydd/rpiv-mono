@@ -269,7 +269,7 @@ describe("ask_user_question — raw terminal collapse listener", () => {
 		const handle = makeHandle();
 		const { ctx, componentRef } = driveWithListener(handle, (done) => {
 			const expanded = componentRef.current!.render(120).join("\n");
-			expect(expanded).toContain("Alt+O to collapse");
+			expect(expanded).toContain("Alt+O or double-click to collapse");
 			expect(expanded).not.toContain("Ctrl+]");
 			// Collapse via the component input path — the one-line footer must name
 			// the same key the router actually honours.
@@ -282,16 +282,21 @@ describe("ask_user_question — raw terminal collapse listener", () => {
 		await tool.execute?.("tc", params as never, undefined as never, undefined as never, ctx);
 	});
 
-	it("collapses on a left click on the dialog, consuming the press so motion cannot cancel it", async () => {
+	it("collapses on a double-click on the dialog, consuming the press so motion cannot cancel it", async () => {
 		const tool = register();
 		const handle = makeHandle();
-		const click: QuestionnaireMouseEvent = { type: "click", button: "left", x: 10, y: 2 };
+		const press: QuestionnaireMouseEvent = { type: "press", button: "left", x: 10, y: 2 };
+		const firstClick: QuestionnaireMouseEvent = { type: "click", button: "left", x: 10, y: 2, clickCount: 1 };
+		const secondClick: QuestionnaireMouseEvent = { ...firstClick, clickCount: 2 };
 		const { ctx, componentRef } = driveWithListener(handle, (done) => {
-			expect(componentRef.current!.handleMouse?.({ ...click, type: "press" })).toEqual({
+			expect(componentRef.current!.handleMouse?.(press)).toEqual({
 				handled: true,
 				render: false,
 			});
-			expect(componentRef.current!.handleMouse?.(click)).toEqual({ handled: true, render: true });
+			// The lone click Herdr forwards while focusing the pane must stay inert.
+			expect(componentRef.current!.handleMouse?.(firstClick)).toEqual({ handled: true, render: false });
+			expect(handle.isHidden()).toBe(false);
+			expect(componentRef.current!.handleMouse?.(secondClick)).toEqual({ handled: true, render: true });
 			expect(handle.isHidden()).toBe(true);
 			done({ answers: [], cancelled: true });
 		});

@@ -331,24 +331,44 @@ describe("QuestionnaireSession — mouse collapse toggle", () => {
 		expect(session.isCollapsed()).toBe(false);
 	});
 
-	it("collapses on a left click of the visible dialog", () => {
+	it("leaves a lone click inert — the click a multiplexer forwards while granting pane focus must not dismiss the dialog", () => {
 		const { session } = makeSession();
-		expect(session.component.handleMouse?.(makeMouseEvent())).toEqual({ handled: true, render: true });
-		expect(session.isCollapsed()).toBe(true);
-		expect(session.component.render(120)).toHaveLength(1);
-	});
-
-	it("a second click on the visible dialog expands it again (round-trip)", () => {
-		const { session } = makeSession();
-		session.component.handleMouse?.(makeMouseEvent());
-		expect(session.component.handleMouse?.(makeMouseEvent())).toEqual({ handled: true, render: true });
+		expect(session.component.handleMouse?.(makeMouseEvent())).toEqual({ handled: true, render: false });
 		expect(session.isCollapsed()).toBe(false);
 		expect(session.component.render(120).length).toBeGreaterThan(1);
 	});
 
-	it("toggles even when collapseKey is 'off' — the pointer affordance is independent of the keyboard shortcut", () => {
+	it("collapses on a double-click of the visible dialog", () => {
 		const { session } = makeSession();
-		session.component.handleMouse?.(makeMouseEvent());
+		expect(session.component.handleMouse?.(makeMouseEvent({ clickCount: 2 }))).toEqual({
+			handled: true,
+			render: true,
+		});
+		expect(session.isCollapsed()).toBe(true);
+		expect(session.component.render(120)).toHaveLength(1);
+	});
+
+	it("expands the visible one-line row on a single click and swallows the double-click partner", () => {
+		const { session } = makeSession();
+		session.toggleCollapsedExternal();
+		expect(session.isCollapsed()).toBe(true);
+
+		expect(session.component.handleMouse?.(makeMouseEvent())).toEqual({ handled: true, render: true });
+		expect(session.isCollapsed()).toBe(false);
+		expect(session.component.render(120).length).toBeGreaterThan(1);
+
+		// The second click of the pair lands after the expand; it must not collapse the
+		// row it just reopened.
+		expect(session.component.handleMouse?.(makeMouseEvent({ clickCount: 2 }))).toEqual({
+			handled: true,
+			render: false,
+		});
+		expect(session.isCollapsed()).toBe(false);
+	});
+
+	it("collapses on a double-click even when collapseKey is 'off' — the pointer affordance is independent of the keyboard shortcut", () => {
+		const { session } = makeSession();
+		session.component.handleMouse?.(makeMouseEvent({ clickCount: 2 }));
 		expect(session.isCollapsed()).toBe(true);
 	});
 
@@ -365,7 +385,6 @@ describe("QuestionnaireSession — mouse collapse toggle", () => {
 		["release", makeMouseEvent({ type: "release" })],
 		["wheel", makeMouseEvent({ type: "wheel" })],
 		["drag", makeMouseEvent({ type: "drag" })],
-		["double click", makeMouseEvent({ clickCount: 2 })],
 	])("ignores %s", (_label, event) => {
 		const { session } = makeSession();
 		expect(session.component.handleMouse?.(event)).toBeUndefined();
